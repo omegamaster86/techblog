@@ -1,9 +1,28 @@
-import Image from "next/image";
+import LinkCard from "./components/card";
 
 export default function Home() {
-  return (
-    <div className="grid grid-rows-[20px_1fr_20px] items-center justify-items-center min-h-screen p-8 pb-20 gap-16 sm:p-20 font-[family-name:var(--font-geist-sans)]">
-      <h1>Hello World</h1>
-    </div>
-  );
+	return (
+		<div className="min-h-screen bg-linear-to-r/srgb from-indigo-500 to-teal-400 p-4">
+			<div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-5 max-w-5xl mx-auto">
+				<LinkCard title="Zennへ移動" href="https://zenn.dev/" />
+				<LinkCard title="qiitaへ移動" href="https://qiita.com/" />
+				<LinkCard
+					title="ubieへ移動"
+					href="https://ubie-inc.notion.site/Ubie-e5ca482892574b198160de93b5ba067a"
+				/>
+				<LinkCard
+					title="令和トラベルへ移動"
+					href="https://engineering.reiwatravel.co.jp/category/all/"
+				/>
+				<LinkCard
+					title="futureへ移動"
+					href="https://future-architect.github.io/"
+				/>
+				<LinkCard
+					title="loglassへ移動"
+					href="https://prd-blog.loglass.co.jp/entry/engineer_list"
+				/>
+			</div>
+		</div>
+	);
 }
