@@ -7,20 +7,36 @@ export default function Home() {
 				<LinkCard title="Zennへ移動" href="https://zenn.dev/" />
 				<LinkCard title="qiitaへ移動" href="https://qiita.com/" />
 				<LinkCard
-					title="ubieへ移動"
+					title="ubie Tech Blogへ移動"
 					href="https://ubie-inc.notion.site/Ubie-e5ca482892574b198160de93b5ba067a"
 				/>
 				<LinkCard
-					title="令和トラベルへ移動"
+					title="令和トラベル Tech Blogへ移動"
 					href="https://engineering.reiwatravel.co.jp/category/all/"
 				/>
 				<LinkCard
-					title="futureへ移動"
+					title="future Tech Blogへ移動"
 					href="https://future-architect.github.io/"
 				/>
 				<LinkCard
-					title="loglassへ移動"
+					title="loglass Tech Blogへ移動"
 					href="https://prd-blog.loglass.co.jp/entry/engineer_list"
+				/>
+				<LinkCard
+					title="Sansan Tech Blogへ移動"
+					href="https://buildersbox.corp-sansan.com/"
+				/>
+				<LinkCard
+					title="cyberagent Tech Blogへ移動"
+					href="https://developers.cyberagent.co.jp/blog/"
+				/>
+				<LinkCard
+					title="LINEヤフー株式会社 Tech Blogへ移動"
+					href="https://techblog.lycorp.co.jp/ja"
+				/>
+				<LinkCard
+					title="DeNA Tech Blogへ移動"
+					href="https://engineering.dena.com/blog/"
 				/>
 			</div>
 		</div>
