@@ -18,8 +18,8 @@ export const metadata: Metadata = {
 	title: "Tech Blog",
 	description: "オメマスの技術ブログ",
 	icons: {
-		icon: "/favicon.svg",
-		apple: "/favicon.svg",
+		icon: "/image1.jpeg",
+		apple: "/image1.jpeg",
 	},
 };
 
