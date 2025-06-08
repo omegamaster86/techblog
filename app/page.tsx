@@ -27,6 +27,10 @@ export default function Home() {
 					title="LINEヤフー株式会社 Tech Blogへ移動"
 					href="https://techblog.lycorp.co.jp/ja"
 				/>
+				<LinkCard
+					title="React コアチームのDan Blogへ移動"
+					href="https://overreacted.io/"
+				/>
 			</div>
 		</div>
 	);
