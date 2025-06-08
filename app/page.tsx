@@ -24,20 +24,8 @@ export default function Home() {
 					href="https://prd-blog.loglass.co.jp/entry/engineer_list"
 				/>
 				<LinkCard
-					title="Sansan Tech Blogへ移動"
-					href="https://buildersbox.corp-sansan.com/"
-				/>
-				<LinkCard
-					title="cyberagent Tech Blogへ移動"
-					href="https://developers.cyberagent.co.jp/blog/"
-				/>
-				<LinkCard
 					title="LINEヤフー株式会社 Tech Blogへ移動"
 					href="https://techblog.lycorp.co.jp/ja"
-				/>
-				<LinkCard
-					title="DeNA Tech Blogへ移動"
-					href="https://engineering.dena.com/blog/"
 				/>
 			</div>
 		</div>
