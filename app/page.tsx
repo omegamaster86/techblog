@@ -24,8 +24,8 @@ export default function Home() {
 					href="https://prd-blog.loglass.co.jp/entry/engineer_list"
 				/>
 				<LinkCard
-					title="LINEヤフー株式会社 Tech Blogへ移動"
-					href="https://techblog.lycorp.co.jp/ja"
+					title="AI・Techカタログへ移動"
+					href="https://findy-code.io/ai-tech-catalogs"
 				/>
 				<LinkCard
 					title="React コアチームのDan Blogへ移動"
