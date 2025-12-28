@@ -1,6 +1,6 @@
 "use client";
 
-import { Group, Paper, TextInput, Title } from "@mantine/core";
+import { Group, Modal, TextInput, Title } from "@mantine/core";
 import { useMutation } from "convex/react";
 import { useState } from "react";
 import { api } from "../../convex/_generated/api";
@@ -21,26 +21,25 @@ export function LinkForm() {
 		setIsOpen(false);
 	};
 
-	if (!isOpen) {
-		return (
-			<div className="max-w-5xl mx-auto mb-4">
-				<button
-					type="button"
-					onClick={() => setIsOpen(true)}
-					className="bg-white p-2 border-white rounded-md"
-				>
-					+ リンクを追加
-				</button>
-			</div>
-		);
-	}
-
 	return (
-		<div className="max-w-5xl mx-auto mb-4">
-			<Paper shadow="sm" p="md" radius="md" withBorder>
-				<Title order={4} mb="md">
-					新しいリンクを追加
-				</Title>
+		<>
+			{/* FAB: 右下固定の+ボタン */}
+			<button
+				type="button"
+				onClick={() => setIsOpen(true)}
+				className="fixed bottom-6 right-6 w-14 h-14 bg-white rounded-full shadow-lg flex items-center justify-center text-3xl font-light text-indigo-600 hover:bg-indigo-50 hover:scale-110 transition-all duration-200 z-50"
+				aria-label="リンクを追加"
+			>
+				+
+			</button>
+
+			{/* モーダル */}
+			<Modal
+				opened={isOpen}
+				onClose={() => setIsOpen(false)}
+				title={<Title order={4}>新しいリンクを追加</Title>}
+				centered
+			>
 				<form onSubmit={handleSubmit}>
 					<TextInput
 						label="タイトル"
@@ -58,20 +57,23 @@ export function LinkForm() {
 						required
 						mb="md"
 					/>
-					<Group>
-						<button type="submit" className="bg-blue-500 text-white p-2 rounded-md">
-							追加
-						</button>
+					<Group justify="flex-end">
 						<button
 							type="button"
-							className="bg-gray-500 text-white p-2 rounded-md"
+							className="bg-gray-200 text-gray-700 px-4 py-2 rounded-md hover:bg-gray-300 transition-colors"
 							onClick={() => setIsOpen(false)}
 						>
 							キャンセル
 						</button>
+						<button
+							type="submit"
+							className="bg-indigo-500 text-white px-4 py-2 rounded-md hover:bg-indigo-600 transition-colors"
+						>
+							追加
+						</button>
 					</Group>
 				</form>
-			</Paper>
-		</div>
+			</Modal>
+		</>
 	);
 }
