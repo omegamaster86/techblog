@@ -1,5 +1,5 @@
-import { mutation, query } from "./_generated/server";
 import { v } from "convex/values";
+import { mutation, query } from "./_generated/server";
 
 // 全リンクを取得
 export const list = query({
@@ -33,9 +33,3 @@ export const remove = mutation({
 		await ctx.db.delete(args.id);
 	},
 });
-
-
-
-
-
-
