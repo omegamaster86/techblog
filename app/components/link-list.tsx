@@ -1,10 +1,10 @@
 "use client";
 
-import { useQuery, useMutation } from "convex/react";
+import { ActionIcon, Button, Card, Group, Text } from "@mantine/core";
+import { useMutation, useQuery } from "convex/react";
+import Link from "next/link";
 import { api } from "../../convex/_generated/api";
 import type { Id } from "../../convex/_generated/dataModel";
-import { Card, Group, Text, Button, ActionIcon } from "@mantine/core";
-import Link from "next/link";
 
 export function LinkList() {
 	const links = useQuery(api.links.list);
@@ -15,9 +15,7 @@ export function LinkList() {
 	};
 
 	if (links === undefined) {
-		return (
-			<div className="text-white text-center py-8">読み込み中...</div>
-		);
+		return <div className="text-white text-center py-8">読み込み中...</div>;
 	}
 
 	if (links.length === 0) {
