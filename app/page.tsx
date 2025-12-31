@@ -1,5 +1,5 @@
-import { LinkList } from "./components/link-list";
 import { LinkForm } from "./components/link-form";
+import { LinkList } from "./components/link-list";
 
 export default function Home() {
 	return (
