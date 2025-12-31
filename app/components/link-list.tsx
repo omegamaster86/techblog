@@ -1,6 +1,7 @@
 "use client";
 
 import { ActionIcon, Button, Card, Group, Text } from "@mantine/core";
+import { IconTrash } from "@tabler/icons-react";
 import { useMutation, useQuery } from "convex/react";
 import Link from "next/link";
 import { api } from "../../convex/_generated/api";
@@ -48,7 +49,7 @@ export function LinkList() {
 							onClick={() => handleDelete(link._id)}
 							aria-label="削除"
 						>
-							×
+							<IconTrash size={16} />
 						</ActionIcon>
 					</Group>
 
