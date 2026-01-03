@@ -15,7 +15,8 @@
     "convex": "^1.29.3",
     "next": "^15.5.9",
     "react": "^19.0.0",
-    "react-dom": "^19.0.0"
+    "react-dom": "^19.0.0",
+    "three": "^0.182.0"
   },
   "devDependencies": {
     "@biomejs/biome": "1.9.4",
