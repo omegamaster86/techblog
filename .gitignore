@@ -43,4 +43,5 @@ next-env.d.ts
 .cursor
 
 package-lock.json
-
+.npm-cache
+.tmp
