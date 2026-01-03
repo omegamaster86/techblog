@@ -174,6 +174,8 @@ export function SpaceBackground() {
 		const galaxyGeometry = new THREE.BufferGeometry();
 		const galaxyPositions = new Float32Array(galaxyCount * 3);
 		const galaxyColors = new Float32Array(galaxyCount * 3);
+		const galaxySizes = new Float32Array(galaxyCount);
+		const galaxyTwinkle = new Float32Array(galaxyCount);
 		const innerColor = new THREE.Color("#b388ff");
 		const outerColor = new THREE.Color("#00d9ff");
 		for (let i = 0; i < galaxyCount; i++) {
@@ -195,6 +197,10 @@ export function SpaceBackground() {
 			galaxyColors[i3] = mixed.r;
 			galaxyColors[i3 + 1] = mixed.g;
 			galaxyColors[i3 + 2] = mixed.b;
+
+			// keep galaxy points small; add subtle per-point variation
+			galaxySizes[i] = 0.7 + Math.random() ** 2 * 1.8;
+			galaxyTwinkle[i] = Math.random() * Math.PI * 2;
 		}
 		galaxyGeometry.setAttribute(
 			"position",
@@ -204,14 +210,63 @@ export function SpaceBackground() {
 			"color",
 			new THREE.BufferAttribute(galaxyColors, 3),
 		);
-		const galaxyMaterial = new THREE.PointsMaterial({
-			size: 0.08,
-			sizeAttenuation: true,
-			vertexColors: true,
+		galaxyGeometry.setAttribute(
+			"aSize",
+			new THREE.BufferAttribute(galaxySizes, 1),
+		);
+		galaxyGeometry.setAttribute(
+			"aTwinkle",
+			new THREE.BufferAttribute(galaxyTwinkle, 1),
+		);
+
+		// Use ShaderMaterial (same approach as stars) to avoid square point sprites
+		const galaxyMaterial = new THREE.ShaderMaterial({
 			transparent: true,
-			opacity: 0.95,
 			depthWrite: false,
 			blending: THREE.AdditiveBlending,
+			uniforms: {
+				uTime: { value: 0 },
+				uPixelRatio: { value: renderer.getPixelRatio() },
+			},
+			vertexShader: `
+				attribute float aSize;
+				attribute float aTwinkle;
+				varying vec3 vColor;
+				varying float vTwinkle;
+				uniform float uPixelRatio;
+				uniform float uTime;
+
+				void main() {
+					vColor = color;
+					vTwinkle = aTwinkle;
+					vec4 mvPosition = modelViewMatrix * vec4(position, 1.0);
+					float dist = max(1.0, -mvPosition.z);
+					// Slightly smaller than stars; still perspective-aware
+					float size = aSize * uPixelRatio * (38.0 / dist);
+					gl_PointSize = clamp(size, 1.0, 4.0);
+					gl_Position = projectionMatrix * mvPosition;
+				}
+			`,
+			fragmentShader: `
+				varying vec3 vColor;
+				varying float vTwinkle;
+				uniform float uTime;
+
+				void main() {
+					vec2 uv = gl_PointCoord - vec2(0.5);
+					float d = length(uv);
+					// soft circular falloff
+					float core = smoothstep(0.50, 0.12, d);
+					float halo = smoothstep(0.50, 0.00, d) * 0.28;
+
+					float tw = 0.92 + 0.08 * sin(uTime * 0.9 + vTwinkle);
+					float alpha = (core + halo) * tw;
+					if (alpha < 0.02) discard;
+
+					gl_FragColor = vec4(vColor, alpha);
+				}
+			`,
+			vertexColors: true,
 		});
 		const galaxyPoints = new THREE.Points(galaxyGeometry, galaxyMaterial);
 		galaxy.add(galaxyPoints);
@@ -384,6 +439,7 @@ export function SpaceBackground() {
 			const height = Math.max(1, container.clientHeight);
 			renderer.setSize(width, height, false);
 			starsMaterial.uniforms.uPixelRatio.value = renderer.getPixelRatio();
+			galaxyMaterial.uniforms.uPixelRatio.value = renderer.getPixelRatio();
 			camera.aspect = width / height;
 			camera.updateProjectionMatrix();
 		};
@@ -399,6 +455,7 @@ export function SpaceBackground() {
 			const t = clock.getElapsedTime();
 
 			starsMaterial.uniforms.uTime.value = t;
+			galaxyMaterial.uniforms.uTime.value = t;
 			galaxy.rotation.y = t * 0.08;
 			galaxy.rotation.z = t * 0.03;
 			stars.rotation.y = t * 0.01;
