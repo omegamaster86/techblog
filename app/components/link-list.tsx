@@ -37,6 +37,12 @@ export function LinkList() {
 					radius="md"
 					withBorder
 					className="flex flex-col h-[160px]"
+					style={{
+						backgroundColor: "rgba(255, 255, 255, 0.2)",
+						borderColor: "rgba(255, 255, 255, 0.28)",
+						backdropFilter: "blur(14px) saturate(160%)",
+						WebkitBackdropFilter: "blur(14px) saturate(160%)",
+					}}
 				>
 					<Group justify="space-between" mt="md" mb="xs" wrap="nowrap">
 						<Text fw={500} lineClamp={1} className="flex-1">
