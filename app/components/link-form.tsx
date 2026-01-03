@@ -29,6 +29,12 @@ export function LinkForm() {
 				onClick={() => setIsOpen(true)}
 				className="fixed bottom-6 right-6 w-14 h-14 bg-white rounded-full shadow-lg flex items-center justify-center text-3xl font-light text-indigo-600 hover:bg-indigo-50 hover:scale-110 transition-all duration-200 z-50"
 				aria-label="リンクを追加"
+				style={{
+					backgroundColor: "rgba(255, 255, 255, 0.2)",
+					borderColor: "rgba(255, 255, 255, 0.28)",
+					backdropFilter: "blur(14px) saturate(160%)",
+					WebkitBackdropFilter: "blur(14px) saturate(160%)",
+				}}
 			>
 				+
 			</button>

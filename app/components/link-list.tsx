@@ -45,7 +45,7 @@ export function LinkList() {
 					}}
 				>
 					<Group justify="space-between" mt="md" mb="xs" wrap="nowrap">
-						<Text fw={500} lineClamp={1} className="flex-1">
+						<Text fw={500} c="white" lineClamp={1} className="flex-1">
 							{link.title}
 						</Text>
 						<ActionIcon

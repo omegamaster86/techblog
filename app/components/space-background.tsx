@@ -82,13 +82,17 @@ export function SpaceBackground() {
 
 			const c = starColor(Math.random());
 			// tiny random tint variation
-			c.offsetHSL((Math.random() - 0.5) * 0.02, 0, (Math.random() - 0.5) * 0.06);
+			c.offsetHSL(
+				(Math.random() - 0.5) * 0.02,
+				0,
+				(Math.random() - 0.5) * 0.06,
+			);
 			starsColors[i3] = c.r;
 			starsColors[i3 + 1] = c.g;
 			starsColors[i3 + 2] = c.b;
 
 			// size + brightness: many small, few large
-			const size = 0.8 + (Math.random() ** 3) * 3.2;
+			const size = 0.8 + Math.random() ** 3 * 3.2;
 			starsSizes[i] = size;
 			starsTwinkle[i] = Math.random() * Math.PI * 2;
 		}
