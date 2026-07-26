@@ -52,16 +52,44 @@ export const remove = mutation({
 	},
 });
 
+// 既存データに order が無い場合に 0..n-1 を付与
+export const ensureOrders = mutation({
+	handler: async (ctx) => {
+		const links = (await ctx.db.query("links").collect()).sort(compareLinks);
+		let updated = 0;
+
+		for (const [index, link] of links.entries()) {
+			if (link.order !== index) {
+				await ctx.db.patch(link._id, { order: index });
+				updated += 1;
+			}
+		}
+
+		return { updated };
+	},
+});
+
 // リンクの並び順を更新
 export const reorder = mutation({
 	args: {
 		orderedIds: v.array(v.id("links")),
 	},
 	handler: async (ctx, args) => {
-		await Promise.all(
-			args.orderedIds.map((id, index) =>
-				ctx.db.patch(id, { order: index }),
-			),
-		);
+		const links = await ctx.db.query("links").collect();
+		const linkIds = new Set(links.map((link) => link._id));
+
+		if (args.orderedIds.length !== links.length) {
+			throw new Error("並び替え対象の件数が一致しません");
+		}
+
+		for (const id of args.orderedIds) {
+			if (!linkIds.has(id)) {
+				throw new Error("存在しないリンクが含まれています");
+			}
+		}
+
+		for (const [index, id] of args.orderedIds.entries()) {
+			await ctx.db.patch(id, { order: index });
+		}
 	},
 });

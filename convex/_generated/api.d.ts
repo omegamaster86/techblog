@@ -9,7 +9,6 @@
  */
 
 import type * as links from "../links.js";
-import type * as seed from "../seed.js";
 
 import type {
   ApiFromModules,
@@ -19,7 +18,6 @@ import type {
 
 declare const fullApi: ApiFromModules<{
   links: typeof links;
-  seed: typeof seed;
 }>;
 
 /**
