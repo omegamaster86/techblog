@@ -1,11 +1,22 @@
 "use client";
 
 import {
-	DragDropContext,
-	Draggable,
-	type DropResult,
-	Droppable,
-} from "@hello-pangea/dnd";
+	DndContext,
+	type DragEndEvent,
+	KeyboardSensor,
+	PointerSensor,
+	closestCenter,
+	useSensor,
+	useSensors,
+} from "@dnd-kit/core";
+import {
+	SortableContext,
+	arrayMove,
+	rectSortingStrategy,
+	sortableKeyboardCoordinates,
+	useSortable,
+} from "@dnd-kit/sortable";
+import { CSS } from "@dnd-kit/utilities";
 import { ActionIcon, Button, Card, Group, Text } from "@mantine/core";
 import { IconGripVertical, IconTrash } from "@tabler/icons-react";
 import { useMutation, useQuery } from "convex/react";
@@ -101,6 +112,43 @@ function StaticLinkGrid({
 	);
 }
 
+function SortableLinkCard({
+	link,
+	onDelete,
+}: {
+	link: LinkItem;
+	onDelete: (id: Id<"links">) => void;
+}) {
+	const {
+		attributes,
+		listeners,
+		setNodeRef,
+		transform,
+		transition,
+		isDragging,
+	} = useSortable({ id: link._id });
+
+	const style = {
+		transform: CSS.Transform.toString(transform),
+		transition,
+		opacity: isDragging ? 0.85 : 1,
+	};
+
+	return (
+		<div
+			ref={setNodeRef}
+			style={style}
+			className="w-full md:w-[calc(50%-10px)] lg:w-[calc(33.333%-14px)]"
+		>
+			<LinkCardContent
+				link={link}
+				onDelete={onDelete}
+				dragHandleProps={{ ...attributes, ...listeners }}
+			/>
+		</div>
+	);
+}
+
 export function LinkList() {
 	const links = useQuery(api.links.list);
 	const removeLink = useMutation(api.links.remove);
@@ -111,6 +159,15 @@ export function LinkList() {
 	const [saveError, setSaveError] = useState<string | null>(null);
 	const isPersistingRef = useRef(false);
 	const hasEnsuredOrdersRef = useRef(false);
+
+	const sensors = useSensors(
+		useSensor(PointerSensor, {
+			activationConstraint: { distance: 8 },
+		}),
+		useSensor(KeyboardSensor, {
+			coordinateGetter: sortableKeyboardCoordinates,
+		}),
+	);
 
 	useEffect(() => {
 		setIsMounted(true);
@@ -152,18 +209,17 @@ export function LinkList() {
 		await removeLink({ id });
 	};
 
-	const handleDragEnd = async (result: DropResult) => {
+	const handleDragEnd = async (event: DragEndEvent) => {
 		setSaveError(null);
 
-		if (!result.destination) return;
+		const { active, over } = event;
+		if (!over || active.id === over.id) return;
 
-		const sourceIndex = result.source.index;
-		const destinationIndex = result.destination.index;
-		if (sourceIndex === destinationIndex) return;
+		const oldIndex = items.findIndex((item) => item._id === active.id);
+		const newIndex = items.findIndex((item) => item._id === over.id);
+		if (oldIndex === -1 || newIndex === -1 || oldIndex === newIndex) return;
 
-		const reordered = [...items];
-		const [moved] = reordered.splice(sourceIndex, 1);
-		reordered.splice(destinationIndex, 0, moved);
+		const reordered = arrayMove(items, oldIndex, newIndex);
 
 		isPersistingRef.current = true;
 		setItems(reordered);
@@ -206,46 +262,26 @@ export function LinkList() {
 			{!isMounted ? (
 				<StaticLinkGrid items={displayItems} onDelete={handleDelete} />
 			) : (
-				<DragDropContext onDragEnd={handleDragEnd}>
-					<Droppable droppableId="links">
-						{(provided) => (
-							<div
-								ref={provided.innerRef}
-								{...provided.droppableProps}
-								className="flex flex-wrap gap-5 max-w-5xl mx-auto touch-none"
-							>
-								{displayItems.map((link, index) => (
-									<Draggable
-										key={link._id}
-										draggableId={link._id}
-										index={index}
-									>
-										{(draggableProvided, snapshot) => (
-											<div
-												ref={draggableProvided.innerRef}
-												{...draggableProvided.draggableProps}
-												className="w-full md:w-[calc(50%-10px)] lg:w-[calc(33.333%-14px)]"
-												style={{
-													...draggableProvided.draggableProps.style,
-													opacity: snapshot.isDragging ? 0.85 : 1,
-												}}
-											>
-												<LinkCardContent
-													link={link}
-													onDelete={handleDelete}
-													dragHandleProps={
-														draggableProvided.dragHandleProps
-													}
-												/>
-											</div>
-										)}
-									</Draggable>
-								))}
-								{provided.placeholder}
-							</div>
-						)}
-					</Droppable>
-				</DragDropContext>
+				<DndContext
+					sensors={sensors}
+					collisionDetection={closestCenter}
+					onDragEnd={handleDragEnd}
+				>
+					<SortableContext
+						items={displayItems.map((item) => item._id)}
+						strategy={rectSortingStrategy}
+					>
+						<div className="flex flex-wrap gap-5 max-w-5xl mx-auto">
+							{displayItems.map((link) => (
+								<SortableLinkCard
+									key={link._id}
+									link={link}
+									onDelete={handleDelete}
+								/>
+							))}
+						</div>
+					</SortableContext>
+				</DndContext>
 			)}
 		</div>
 	);
