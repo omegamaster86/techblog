@@ -6,5 +6,7 @@ export default defineSchema({
 		title: v.string(),
 		href: v.string(),
 		description: v.optional(v.string()),
+		order: v.optional(v.number()),
 	}),
 });
+
