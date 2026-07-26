@@ -2,10 +2,10 @@
 
 import {
 	DndContext,
-	type DragEndEvent,
+	type DragOverEvent,
 	KeyboardSensor,
 	PointerSensor,
-	closestCenter,
+	closestCorners,
 	useSensor,
 	useSensors,
 } from "@dnd-kit/core";
@@ -21,6 +21,7 @@ import { ActionIcon, Button, Card, Group, Text } from "@mantine/core";
 import { IconGripVertical, IconTrash } from "@tabler/icons-react";
 import { useMutation, useQuery } from "convex/react";
 import Link from "next/link";
+import { useEffect, useRef, useState } from "react";
 import { api } from "../../convex/_generated/api";
 import type { Doc, Id } from "../../convex/_generated/dataModel";
 
@@ -109,6 +110,15 @@ export function LinkList() {
 	const links = useQuery(api.links.list);
 	const removeLink = useMutation(api.links.remove);
 	const reorderLinks = useMutation(api.links.reorder);
+	const [items, setItems] = useState<LinkItem[]>([]);
+	const itemsRef = useRef<LinkItem[]>([]);
+
+	useEffect(() => {
+		if (links) {
+			setItems(links);
+			itemsRef.current = links;
+		}
+	}, [links]);
 
 	const sensors = useSensors(
 		useSensor(PointerSensor, {
@@ -123,16 +133,43 @@ export function LinkList() {
 		await removeLink({ id });
 	};
 
-	const handleDragEnd = async (event: DragEndEvent) => {
+	const moveItem = (activeId: string, overId: string) => {
+		setItems((current) => {
+			const oldIndex = current.findIndex((link) => link._id === activeId);
+			const newIndex = current.findIndex((link) => link._id === overId);
+			if (oldIndex === -1 || newIndex === -1 || oldIndex === newIndex) {
+				return current;
+			}
+			const next = arrayMove(current, oldIndex, newIndex);
+			itemsRef.current = next;
+			return next;
+		});
+	};
+
+	const handleDragOver = (event: DragOverEvent) => {
 		const { active, over } = event;
-		if (!over || active.id === over.id || !links) return;
+		if (!over || active.id === over.id) return;
+		moveItem(String(active.id), String(over.id));
+	};
 
-		const oldIndex = links.findIndex((link) => link._id === active.id);
-		const newIndex = links.findIndex((link) => link._id === over.id);
-		if (oldIndex === -1 || newIndex === -1) return;
+	const handleDragEnd = async () => {
+		if (!links) return;
 
-		const reordered = arrayMove(links, oldIndex, newIndex);
-		await reorderLinks({ orderedIds: reordered.map((link) => link._id) });
+		const finalItems = itemsRef.current;
+		const hasOrderChanged = finalItems.some(
+			(link, index) => link._id !== links[index]?._id,
+		);
+		if (!hasOrderChanged) return;
+
+		try {
+			await reorderLinks({
+				orderedIds: finalItems.map((link) => link._id),
+			});
+		} catch (error) {
+			console.error("並び替えの保存に失敗しました:", error);
+			setItems(links);
+			itemsRef.current = links;
+		}
 	};
 
 	if (links === undefined) {
@@ -150,15 +187,16 @@ export function LinkList() {
 	return (
 		<DndContext
 			sensors={sensors}
-			collisionDetection={closestCenter}
+			collisionDetection={closestCorners}
+			onDragOver={handleDragOver}
 			onDragEnd={handleDragEnd}
 		>
 			<SortableContext
-				items={links.map((link) => link._id)}
+				items={items.map((link) => link._id)}
 				strategy={rectSortingStrategy}
 			>
 				<div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-5 max-w-5xl mx-auto">
-					{links.map((link) => (
+					{items.map((link) => (
 						<SortableLinkCard
 							key={link._id}
 							link={link}
