@@ -2,7 +2,9 @@
 
 import {
 	DndContext,
+	type DragEndEvent,
 	type DragOverEvent,
+	type DragStartEvent,
 	KeyboardSensor,
 	PointerSensor,
 	closestCorners,
@@ -26,6 +28,12 @@ import { api } from "../../convex/_generated/api";
 import type { Doc, Id } from "../../convex/_generated/dataModel";
 
 type LinkItem = Doc<"links">;
+
+function hasSameOrder(a: LinkItem[], b: LinkItem[]) {
+	return (
+		a.length === b.length && a.every((item, index) => item._id === b[index]?._id)
+	);
+}
 
 function SortableLinkCard({
 	link,
@@ -51,58 +59,58 @@ function SortableLinkCard({
 	};
 
 	return (
-		<Card
-			ref={setNodeRef}
-			style={{
-				...style,
-				backgroundColor: "rgba(255, 255, 255, 0.2)",
-				borderColor: "rgba(255, 255, 255, 0.28)",
-				backdropFilter: "blur(14px) saturate(160%)",
-				WebkitBackdropFilter: "blur(14px) saturate(160%)",
-			}}
-			shadow="sm"
-			padding="lg"
-			radius="md"
-			withBorder
-			className="flex flex-col h-[160px]"
-		>
-			<Group justify="space-between" mt="md" mb="xs" wrap="nowrap">
-				<Group gap="xs" wrap="nowrap" className="flex-1 min-w-0">
+		<div ref={setNodeRef} style={style} className="touch-none">
+			<Card
+				shadow="sm"
+				padding="lg"
+				radius="md"
+				withBorder
+				className="flex flex-col h-[160px]"
+				style={{
+					backgroundColor: "rgba(255, 255, 255, 0.2)",
+					borderColor: "rgba(255, 255, 255, 0.28)",
+					backdropFilter: "blur(14px) saturate(160%)",
+					WebkitBackdropFilter: "blur(14px) saturate(160%)",
+				}}
+			>
+				<Group justify="space-between" mt="md" mb="xs" wrap="nowrap">
+					<Group gap="xs" wrap="nowrap" className="flex-1 min-w-0">
+						<ActionIcon
+							variant="subtle"
+							color="gray"
+							size="sm"
+							{...attributes}
+							{...listeners}
+							aria-label="ドラッグして並び替え"
+							className="cursor-grab active:cursor-grabbing shrink-0"
+							style={{ touchAction: "none" }}
+						>
+							<IconGripVertical size={16} color="white" />
+						</ActionIcon>
+						<Text fw={500} c="white" lineClamp={1} className="flex-1">
+							{link.title}
+						</Text>
+					</Group>
 					<ActionIcon
-						variant="subtle"
-						color="gray"
+						variant="light"
+						color="red"
 						size="sm"
-						{...attributes}
-						{...listeners}
-						aria-label="ドラッグして並び替え"
-						className="cursor-grab active:cursor-grabbing shrink-0"
-						style={{ touchAction: "none" }}
+						onClick={() => onDelete(link._id)}
+						aria-label="削除"
 					>
-						<IconGripVertical size={16} color="white" />
+						<IconTrash size={16} />
 					</ActionIcon>
-					<Text fw={500} c="white" lineClamp={1} className="flex-1">
-						{link.title}
-					</Text>
 				</Group>
-				<ActionIcon
-					variant="light"
-					color="red"
-					size="sm"
-					onClick={() => onDelete(link._id)}
-					aria-label="削除"
-				>
-					<IconTrash size={16} />
-				</ActionIcon>
-			</Group>
 
-			<div className="mt-auto">
-				<Link href={link.href} target="_blank" rel="noopener noreferrer">
-					<Button color="blue" fullWidth radius="md">
-						移動
-					</Button>
-				</Link>
-			</div>
-		</Card>
+				<div className="mt-auto">
+					<Link href={link.href} target="_blank" rel="noopener noreferrer">
+						<Button color="blue" fullWidth radius="md">
+							移動
+						</Button>
+					</Link>
+				</div>
+			</Card>
+		</div>
 	);
 }
 
@@ -112,12 +120,18 @@ export function LinkList() {
 	const reorderLinks = useMutation(api.links.reorder);
 	const [items, setItems] = useState<LinkItem[]>([]);
 	const itemsRef = useRef<LinkItem[]>([]);
+	const isDraggingRef = useRef(false);
 
 	useEffect(() => {
-		if (links) {
-			setItems(links);
-			itemsRef.current = links;
-		}
+		if (!links || isDraggingRef.current) return;
+
+		setItems((current) => {
+			if (current.length === 0 || !hasSameOrder(current, links)) {
+				itemsRef.current = links;
+				return links;
+			}
+			return current;
+		});
 	}, [links]);
 
 	const sensors = useSensors(
@@ -133,33 +147,42 @@ export function LinkList() {
 		await removeLink({ id });
 	};
 
-	const moveItem = (activeId: string, overId: string) => {
-		setItems((current) => {
-			const oldIndex = current.findIndex((link) => link._id === activeId);
-			const newIndex = current.findIndex((link) => link._id === overId);
-			if (oldIndex === -1 || newIndex === -1 || oldIndex === newIndex) {
-				return current;
-			}
-			const next = arrayMove(current, oldIndex, newIndex);
-			itemsRef.current = next;
-			return next;
-		});
+	const reorderItems = (activeId: string, overId: string) => {
+		const current = itemsRef.current;
+		const oldIndex = current.findIndex((link) => link._id === activeId);
+		const newIndex = current.findIndex((link) => link._id === overId);
+		if (oldIndex === -1 || newIndex === -1 || oldIndex === newIndex) {
+			return current;
+		}
+
+		const next = arrayMove(current, oldIndex, newIndex);
+		itemsRef.current = next;
+		setItems(next);
+		return next;
+	};
+
+	const handleDragStart = (_event: DragStartEvent) => {
+		isDraggingRef.current = true;
+		itemsRef.current = items;
 	};
 
 	const handleDragOver = (event: DragOverEvent) => {
 		const { active, over } = event;
 		if (!over || active.id === over.id) return;
-		moveItem(String(active.id), String(over.id));
+		reorderItems(String(active.id), String(over.id));
 	};
 
-	const handleDragEnd = async () => {
-		if (!links) return;
+	const handleDragEnd = async (event: DragEndEvent) => {
+		const { active, over } = event;
 
-		const finalItems = itemsRef.current;
-		const hasOrderChanged = finalItems.some(
-			(link, index) => link._id !== links[index]?._id,
-		);
-		if (!hasOrderChanged) return;
+		let finalItems = itemsRef.current;
+		if (over && active.id !== over.id) {
+			finalItems = reorderItems(String(active.id), String(over.id));
+		}
+
+		isDraggingRef.current = false;
+
+		if (!links || hasSameOrder(finalItems, links)) return;
 
 		try {
 			await reorderLinks({
@@ -167,6 +190,14 @@ export function LinkList() {
 			});
 		} catch (error) {
 			console.error("並び替えの保存に失敗しました:", error);
+			setItems(links);
+			itemsRef.current = links;
+		}
+	};
+
+	const handleDragCancel = () => {
+		isDraggingRef.current = false;
+		if (links) {
 			setItems(links);
 			itemsRef.current = links;
 		}
@@ -188,8 +219,10 @@ export function LinkList() {
 		<DndContext
 			sensors={sensors}
 			collisionDetection={closestCorners}
+			onDragStart={handleDragStart}
 			onDragOver={handleDragOver}
 			onDragEnd={handleDragEnd}
+			onDragCancel={handleDragCancel}
 		>
 			<SortableContext
 				items={items.map((link) => link._id)}
