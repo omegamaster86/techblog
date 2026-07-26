@@ -16,6 +16,10 @@ import type { Doc, Id } from "../../convex/_generated/dataModel";
 
 type LinkItem = Doc<"links">;
 
+function getOrderKey(items: LinkItem[]) {
+	return items.map((item) => item._id).join(",");
+}
+
 function LinkCardContent({
 	link,
 	onDelete,
@@ -23,7 +27,7 @@ function LinkCardContent({
 }: {
 	link: LinkItem;
 	onDelete: (id: Id<"links">) => void;
-	dragHandleProps?: React.HTMLAttributes<HTMLElement> | null;
+	dragHandleProps?: React.HTMLAttributes<HTMLButtonElement> | null;
 }) {
 	return (
 		<Card
@@ -41,17 +45,15 @@ function LinkCardContent({
 		>
 			<Group justify="space-between" mt="md" mb="xs" wrap="nowrap">
 				<Group gap="xs" wrap="nowrap" className="flex-1 min-w-0">
-					<ActionIcon
-						variant="subtle"
-						color="gray"
-						size="sm"
+					<button
+						type="button"
 						{...(dragHandleProps ?? {})}
 						aria-label="ドラッグして並び替え"
-						className="cursor-grab active:cursor-grabbing shrink-0"
+						className="inline-flex items-center justify-center shrink-0 w-[22px] h-[22px] rounded cursor-grab active:cursor-grabbing text-white/80 hover:text-white hover:bg-white/10 border-0 bg-transparent p-0"
 						style={{ touchAction: "none" }}
 					>
-						<IconGripVertical size={16} color="white" />
-					</ActionIcon>
+						<IconGripVertical size={16} />
+					</button>
 					<Text fw={500} c="white" lineClamp={1} className="flex-1">
 						{link.title}
 					</Text>
@@ -116,7 +118,18 @@ export function LinkList() {
 
 	useEffect(() => {
 		if (!links || isPersistingRef.current) return;
-		setItems(links);
+
+		setItems((current) => {
+			if (current.length === 0) {
+				return links;
+			}
+
+			if (getOrderKey(current) === getOrderKey(links)) {
+				return current;
+			}
+
+			return links;
+		});
 	}, [links]);
 
 	useEffect(() => {
@@ -152,8 +165,8 @@ export function LinkList() {
 		const [moved] = reordered.splice(sourceIndex, 1);
 		reordered.splice(destinationIndex, 0, moved);
 
-		setItems(reordered);
 		isPersistingRef.current = true;
+		setItems(reordered);
 
 		try {
 			await reorderLinks({
@@ -199,7 +212,7 @@ export function LinkList() {
 							<div
 								ref={provided.innerRef}
 								{...provided.droppableProps}
-								className="flex flex-wrap gap-5 max-w-5xl mx-auto"
+								className="flex flex-wrap gap-5 max-w-5xl mx-auto touch-none"
 							>
 								{displayItems.map((link, index) => (
 									<Draggable
