@@ -1,17 +1,331 @@
 "use client";
 
-import { useEffect, useRef } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import * as THREE from "three";
 
-type Planet = {
-	pivot: THREE.Object3D;
-	mesh: THREE.Mesh;
-	orbitSpeed: number;
-	rotationSpeed: number;
+const PARTICLE_COUNT = 12000;
+const BULGE_COUNT = 2200;
+const DUST_COUNT = 1600;
+const STAR_COUNT = 900;
+const ARM_COUNT = 2;
+const TURNS = 2.2;
+const INNER_RADIUS = 4;
+const OUTER_RADIUS = 52;
+const INTRO_DURATION = 3.4;
+
+/**
+ * Near-Archimedean spiral with a slight outward bias, so inner turns stay tight
+ * while the outer sweep opens up.
+ */
+function spiralPoint(arm: number, t: number) {
+	const theta = t * TURNS * Math.PI * 2;
+	const radius = INNER_RADIUS + (OUTER_RADIUS - INNER_RADIUS) * t ** 1.22;
+	const angle = theta + (arm / ARM_COUNT) * Math.PI * 2;
+	return { radius, angle };
+}
+
+/** Irregular knots so the arms read as clumped dust rather than even beading. */
+function armClumping(t: number, arm: number) {
+	const phase = arm * 2.7;
+	const knots =
+		Math.sin(t * 47 + phase) * 0.5 +
+		Math.sin(t * 19.3 + phase * 1.7) * 0.32 +
+		Math.sin(t * 7.1 + phase * 0.6) * 0.18;
+	return 0.35 + 0.65 * (knots * 0.5 + 0.5);
+}
+
+function gaussian() {
+	let u = 0;
+	let v = 0;
+	while (u === 0) u = Math.random();
+	while (v === 0) v = Math.random();
+	return Math.sqrt(-2 * Math.log(u)) * Math.cos(Math.PI * 2 * v);
+}
+
+const BOKEH_VERTEX = `
+	attribute float aSize;
+	attribute float aT;
+	attribute float aTwinkle;
+	attribute float aBlur;
+	varying vec3 vColor;
+	varying float vAlpha;
+	varying float vBlur;
+	uniform float uPixelRatio;
+	uniform float uTime;
+	uniform float uFormation;
+	uniform float uSizeScale;
+	uniform float uOpacity;
+
+	void main() {
+		vColor = color;
+		vBlur = aBlur;
+
+		// Particles swirl inward into their final spiral slot, staggered from the core outward.
+		float local = clamp((uFormation - aT * 0.48) / 0.52, 0.0, 1.0);
+		float ease = 1.0 - pow(1.0 - local, 3.0);
+
+		float radius = length(position.xy);
+		float angle = atan(position.y, position.x);
+		float animRadius = mix(radius * 2.15, radius, ease);
+		float animAngle = angle + (1.0 - ease) * 1.6;
+		vec3 animated = vec3(
+			cos(animAngle) * animRadius,
+			sin(animAngle) * animRadius,
+			position.z * ease
+		);
+
+		vec4 mvPosition = modelViewMatrix * vec4(animated, 1.0);
+		float dist = max(1.0, -mvPosition.z);
+		gl_PointSize = clamp(aSize * uSizeScale * uPixelRatio * (78.0 / dist), 1.0, 160.0);
+		gl_Position = projectionMatrix * mvPosition;
+
+		float twinkle = 0.82 + 0.18 * sin(uTime * 0.9 + aTwinkle);
+		vAlpha = ease * twinkle * uOpacity;
+	}
+`;
+
+/**
+ * Wide-aperture look: sharp pinpoints keep a tight core, while out-of-focus
+ * particles spread into soft discs with a faint outer ring. uSoft dials the
+ * whole thing down to a plain gaussian, used for the nebular haze where visible
+ * disc edges would read as smudges.
+ */
+const BOKEH_FRAGMENT = `
+	varying vec3 vColor;
+	varying float vAlpha;
+	varying float vBlur;
+	uniform float uSoft;
+
+	void main() {
+		vec2 uv = gl_PointCoord - vec2(0.5);
+		float d = length(uv) * 2.0;
+		if (d > 1.0) discard;
+
+		float disc = 1.0 - smoothstep(1.0 - vBlur * 0.85 - 0.08, 1.0, d);
+		float rim = smoothstep(0.55, 0.95, d) * (1.0 - smoothstep(0.95, 1.0, d)) * vBlur * 0.45;
+		float core = exp(-d * d * mix(9.0, 2.2, vBlur));
+		float bokeh = disc * mix(0.35, 0.9, vBlur) + core + rim;
+		float haze = exp(-d * d * 3.2) * (1.0 - smoothstep(0.7, 1.0, d));
+
+		float alpha = mix(bokeh, haze, uSoft) * vAlpha;
+		if (alpha < 0.004) discard;
+
+		gl_FragColor = vec4(vColor, alpha);
+	}
+`;
+
+type FieldKind = "grain" | "dust" | "bulge";
+
+function buildSpiralGeometry(count: number, kind: FieldKind) {
+	const dust = kind === "dust";
+	const positions = new Float32Array(count * 3);
+	const colors = new Float32Array(count * 3);
+	const sizes = new Float32Array(count);
+	const blurs = new Float32Array(count);
+	const ts = new Float32Array(count);
+	const twinkles = new Float32Array(count);
+
+	const white = new THREE.Color("#ffffff");
+	const coolWhite = new THREE.Color("#dbe8ff");
+	const blue = new THREE.Color("#b6cdea");
+	const amber = new THREE.Color("#e8a86a");
+
+	for (let i = 0; i < count; i++) {
+		const i3 = i * 3;
+		const arm = i % ARM_COUNT;
+		const t = kind === "bulge" ? Math.random() ** 2 : Math.random() ** 0.82;
+		const { radius, angle } = spiralPoint(arm, t);
+		const clump = armClumping(t, arm);
+
+		if (kind === "bulge") {
+			// Dense luminous core: a flattened gaussian cloud around the centre.
+			const bulgeRadius = Math.abs(gaussian()) * 2.6;
+			const bulgeAngle = Math.random() * Math.PI * 2;
+			positions[i3] = Math.cos(bulgeAngle) * bulgeRadius;
+			positions[i3 + 1] = Math.sin(bulgeAngle) * bulgeRadius;
+			positions[i3 + 2] = gaussian() * 0.8;
+		} else {
+			// Keep grains hugging the arm centreline; the ribbon widens as it unwinds.
+			const width = (dust ? 1.6 : 0.62) * (0.4 + radius * 0.06);
+			const offset = gaussian() * width;
+			const alongJitter = gaussian() * width * 0.6;
+			positions[i3] =
+				Math.cos(angle) * radius +
+				Math.cos(angle + Math.PI / 2) * offset +
+				Math.cos(angle) * alongJitter;
+			positions[i3 + 1] =
+				Math.sin(angle) * radius +
+				Math.sin(angle + Math.PI / 2) * offset +
+				Math.sin(angle) * alongJitter;
+			positions[i3 + 2] = gaussian() * (dust ? 1.6 : 0.5);
+		}
+
+		let color: THREE.Color;
+		let sizeBias = 1;
+		const roll = Math.random();
+		if (kind === "bulge") {
+			color = roll < 0.3 ? coolWhite : white;
+		} else if (roll < 0.14) {
+			color = amber;
+			sizeBias = 0.72;
+		} else if (roll < 0.32) {
+			color = blue;
+			sizeBias = 0.9;
+		} else if (roll < 0.6) {
+			color = coolWhite;
+		} else {
+			color = white;
+		}
+
+		colors[i3] = color.r;
+		colors[i3 + 1] = color.g;
+		colors[i3 + 2] = color.b;
+
+		if (dust) {
+			sizes[i] = (16 + Math.random() * 24) * clump;
+			blurs[i] = 1;
+		} else if (kind === "bulge") {
+			sizes[i] = 0.5 + Math.random() ** 3 * 2.4;
+			blurs[i] = Math.random() * 0.35;
+		} else {
+			// Mostly pinpoints, a scattered few blooming into soft bokeh discs.
+			const roughness = Math.random() ** 4.2;
+			sizes[i] = (0.5 + roughness * 5.6) * sizeBias * (0.55 + clump * 0.8);
+			blurs[i] = Math.min(1, roughness * 1.4 + Math.random() * 0.2);
+		}
+
+		ts[i] = t;
+		twinkles[i] = Math.random() * Math.PI * 2;
+	}
+
+	const geometry = new THREE.BufferGeometry();
+	geometry.setAttribute("position", new THREE.BufferAttribute(positions, 3));
+	geometry.setAttribute("color", new THREE.BufferAttribute(colors, 3));
+	geometry.setAttribute("aSize", new THREE.BufferAttribute(sizes, 1));
+	geometry.setAttribute("aBlur", new THREE.BufferAttribute(blurs, 1));
+	geometry.setAttribute("aT", new THREE.BufferAttribute(ts, 1));
+	geometry.setAttribute("aTwinkle", new THREE.BufferAttribute(twinkles, 1));
+	return geometry;
+}
+
+function createBokehMaterial(opacity: number, sizeScale: number) {
+	return new THREE.ShaderMaterial({
+		transparent: true,
+		depthTest: false,
+		depthWrite: false,
+		blending: THREE.AdditiveBlending,
+		vertexColors: true,
+		uniforms: {
+			uTime: { value: 0 },
+			uPixelRatio: { value: 1 },
+			uFormation: { value: 0 },
+			uOpacity: { value: opacity },
+			uSizeScale: { value: sizeScale },
+		},
+		vertexShader: BOKEH_VERTEX,
+		fragmentShader: BOKEH_FRAGMENT,
+	});
+}
+
+function createStarField(): THREE.Points {
+	const positions = new Float32Array(STAR_COUNT * 3);
+	const colors = new Float32Array(STAR_COUNT * 3);
+	const sizes = new Float32Array(STAR_COUNT);
+
+	for (let i = 0; i < STAR_COUNT; i++) {
+		const i3 = i * 3;
+		positions[i3] = (Math.random() - 0.5) * 340;
+		positions[i3 + 1] = (Math.random() - 0.5) * 340;
+		positions[i3 + 2] = -60 - Math.random() * 60;
+
+		const brightness = 0.3 + Math.random() ** 2 * 0.7;
+		colors[i3] = brightness;
+		colors[i3 + 1] = brightness;
+		colors[i3 + 2] = brightness * (0.95 + Math.random() * 0.1);
+		sizes[i] = 0.6 + Math.random() ** 3 * 2.6;
+	}
+
+	const geometry = new THREE.BufferGeometry();
+	geometry.setAttribute("position", new THREE.BufferAttribute(positions, 3));
+	geometry.setAttribute("color", new THREE.BufferAttribute(colors, 3));
+	geometry.setAttribute("aSize", new THREE.BufferAttribute(sizes, 1));
+
+	const material = new THREE.ShaderMaterial({
+		transparent: true,
+		depthWrite: false,
+		blending: THREE.AdditiveBlending,
+		vertexColors: true,
+		uniforms: { uPixelRatio: { value: 1 } },
+		vertexShader: `
+			attribute float aSize;
+			varying vec3 vColor;
+			uniform float uPixelRatio;
+
+			void main() {
+				vColor = color;
+				vec4 mvPosition = modelViewMatrix * vec4(position, 1.0);
+				gl_PointSize = clamp(aSize * uPixelRatio, 0.8, 3.0);
+				gl_Position = projectionMatrix * mvPosition;
+			}
+		`,
+		fragmentShader: `
+			varying vec3 vColor;
+
+			void main() {
+				vec2 uv = gl_PointCoord - vec2(0.5);
+				float alpha = exp(-dot(uv, uv) * 14.0);
+				if (alpha < 0.02) discard;
+				gl_FragColor = vec4(vColor, alpha * 0.7);
+			}
+		`,
+	});
+
+	return new THREE.Points(geometry, material);
+}
+
+function radialSprite(stops: [number, string][], scale: number): THREE.Sprite {
+	const canvas = document.createElement("canvas");
+	canvas.width = 512;
+	canvas.height = 512;
+	const ctx = canvas.getContext("2d");
+	if (ctx) {
+		const gradient = ctx.createRadialGradient(256, 256, 0, 256, 256, 256);
+		for (const [offset, color] of stops) gradient.addColorStop(offset, color);
+		ctx.fillStyle = gradient;
+		ctx.fillRect(0, 0, 512, 512);
+	}
+
+	const texture = new THREE.CanvasTexture(canvas);
+	texture.colorSpace = THREE.SRGBColorSpace;
+	const sprite = new THREE.Sprite(
+		new THREE.SpriteMaterial({
+			map: texture,
+			transparent: true,
+			blending: THREE.AdditiveBlending,
+			depthTest: false,
+			depthWrite: false,
+		}),
+	);
+	sprite.scale.set(scale, scale, 1);
+	return sprite;
+}
+
+type SpaceBackgroundProps = {
+	onReplayReady?: (replay: () => void) => void;
 };
 
-export function SpaceBackground() {
+export function SpaceBackground({ onReplayReady }: SpaceBackgroundProps) {
 	const containerRef = useRef<HTMLDivElement | null>(null);
+	const replayRef = useRef<(() => void) | null>(null);
+	const [isDragging, setIsDragging] = useState(false);
+
+	const replay = useCallback(() => {
+		replayRef.current?.();
+	}, []);
+
+	useEffect(() => {
+		onReplayReady?.(replay);
+	}, [onReplayReady, replay]);
 
 	useEffect(() => {
 		const container = containerRef.current;
@@ -22,426 +336,128 @@ export function SpaceBackground() {
 			alpha: false,
 			powerPreference: "high-performance",
 		});
-		renderer.setClearColor(0x030014, 1);
+		renderer.setClearColor(0x01030a, 1);
 		renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
 		renderer.outputColorSpace = THREE.SRGBColorSpace;
-		renderer.toneMapping = THREE.ACESFilmicToneMapping;
-		renderer.toneMappingExposure = 1.0;
 		renderer.domElement.style.width = "100%";
 		renderer.domElement.style.height = "100%";
 		renderer.domElement.style.display = "block";
+		renderer.domElement.style.touchAction = "none";
 		container.appendChild(renderer.domElement);
 
 		const scene = new THREE.Scene();
-		scene.fog = new THREE.FogExp2(0x030014, 0.012);
+		const camera = new THREE.PerspectiveCamera(52, 1, 0.1, 600);
+		camera.position.set(0, 0, 78);
 
-		const camera = new THREE.PerspectiveCamera(60, 1, 0.1, 1000);
-		camera.position.set(0, 0, 45);
-
-		const ambient = new THREE.AmbientLight(0xffffff, 0.6);
-		scene.add(ambient);
-		const key = new THREE.PointLight(0x88ccff, 1.2, 200);
-		key.position.set(20, 10, 40);
-		scene.add(key);
-		const sun = new THREE.DirectionalLight(0xfff0d6, 1.0);
-		sun.position.set(-30, 10, 25);
-		scene.add(sun);
-
-		// Distant starfield (more realistic: round sprite, varied colors/sizes, subtle twinkle)
-		const starCount = 5200;
-		const starsGeometry = new THREE.BufferGeometry();
-		const starsPositions = new Float32Array(starCount * 3);
-		const starsColors = new Float32Array(starCount * 3);
-		const starsSizes = new Float32Array(starCount);
-		const starsTwinkle = new Float32Array(starCount);
-
-		const starColor = (t: number) => {
-			// Weighted: mostly white/yellow, some blue, a few orange/red
-			if (t < 0.68) return new THREE.Color(0xffffff);
-			if (t < 0.86) return new THREE.Color(0xfff1d6); // warm white
-			if (t < 0.95) return new THREE.Color(0xcfe7ff); // cool blue
-			return new THREE.Color(0xffd1a6); // orange
-		};
-
-		for (let i = 0; i < starCount; i++) {
-			const i3 = i * 3;
-
-			// Put stars on a large sphere, with slightly higher density near the galaxy plane
-			const r = 260 + Math.random() * 140;
-			const theta = Math.random() * Math.PI * 2;
-			let y = (Math.random() * 2 - 1) * r;
-			// bias: keep more points near y=0
-			y *= 0.6 + 0.4 * Math.random();
-			const xz = Math.sqrt(Math.max(0, r * r - y * y));
-			const x = Math.cos(theta) * xz;
-			const z = Math.sin(theta) * xz;
-
-			starsPositions[i3] = x;
-			starsPositions[i3 + 1] = y;
-			starsPositions[i3 + 2] = z;
-
-			const c = starColor(Math.random());
-			// tiny random tint variation
-			c.offsetHSL(
-				(Math.random() - 0.5) * 0.02,
-				0,
-				(Math.random() - 0.5) * 0.06,
-			);
-			starsColors[i3] = c.r;
-			starsColors[i3 + 1] = c.g;
-			starsColors[i3 + 2] = c.b;
-
-			// size + brightness: many small, few large
-			const size = 0.8 + Math.random() ** 3 * 3.2;
-			starsSizes[i] = size;
-			starsTwinkle[i] = Math.random() * Math.PI * 2;
-		}
-
-		starsGeometry.setAttribute(
-			"position",
-			new THREE.BufferAttribute(starsPositions, 3),
-		);
-		starsGeometry.setAttribute(
-			"color",
-			new THREE.BufferAttribute(starsColors, 3),
-		);
-		starsGeometry.setAttribute(
-			"aSize",
-			new THREE.BufferAttribute(starsSizes, 1),
-		);
-		starsGeometry.setAttribute(
-			"aTwinkle",
-			new THREE.BufferAttribute(starsTwinkle, 1),
-		);
-
-		const starsMaterial = new THREE.ShaderMaterial({
-			transparent: true,
-			depthWrite: false,
-			blending: THREE.AdditiveBlending,
-			uniforms: {
-				uTime: { value: 0 },
-				uPixelRatio: { value: renderer.getPixelRatio() },
-			},
-			vertexShader: `
-				attribute float aSize;
-				attribute float aTwinkle;
-				varying vec3 vColor;
-				varying float vTwinkle;
-				uniform float uPixelRatio;
-				uniform float uTime;
-
-				void main() {
-					vColor = color;
-					vTwinkle = aTwinkle;
-					vec4 mvPosition = modelViewMatrix * vec4(position, 1.0);
-					float dist = max(1.0, -mvPosition.z);
-					// Perspective sizing, clamped for stability
-					float size = aSize * uPixelRatio * (90.0 / dist);
-					gl_PointSize = clamp(size, 1.0, 6.0);
-					gl_Position = projectionMatrix * mvPosition;
-				}
-			`,
-			fragmentShader: `
-				varying vec3 vColor;
-				varying float vTwinkle;
-				uniform float uTime;
-
-				void main() {
-					vec2 uv = gl_PointCoord - vec2(0.5);
-					float d = length(uv);
-					// soft circular falloff
-					float core = smoothstep(0.50, 0.10, d);
-					float halo = smoothstep(0.50, 0.00, d) * 0.35;
-
-					float tw = 0.88 + 0.12 * sin(uTime * 1.4 + vTwinkle);
-					float alpha = (core + halo) * tw;
-					if (alpha < 0.02) discard;
-
-					gl_FragColor = vec4(vColor, alpha);
-				}
-			`,
-			vertexColors: true,
-		});
-
-		const stars = new THREE.Points(starsGeometry, starsMaterial);
+		const stars = createStarField();
 		scene.add(stars);
 
-		// Spiral galaxy (swirl)
-		const galaxy = new THREE.Group();
-		scene.add(galaxy);
+		const spiralGroup = new THREE.Group();
+		spiralGroup.rotation.x = 0.14;
+		scene.add(spiralGroup);
 
-		const galaxyCount = 12000;
-		const galaxyGeometry = new THREE.BufferGeometry();
-		const galaxyPositions = new Float32Array(galaxyCount * 3);
-		const galaxyColors = new Float32Array(galaxyCount * 3);
-		const galaxySizes = new Float32Array(galaxyCount);
-		const galaxyTwinkle = new Float32Array(galaxyCount);
-		const innerColor = new THREE.Color("#b388ff");
-		const outerColor = new THREE.Color("#00d9ff");
-		for (let i = 0; i < galaxyCount; i++) {
-			const i3 = i * 3;
-			const radius = Math.random() ** 0.55 * 50;
-			const branch = i % 4;
-			const branchAngle = (branch / 4) * Math.PI * 2;
-			const spinAngle = radius * 0.35;
-			const randomX = (Math.random() - 0.5) * 0.9 * (1 - radius / 55);
-			const randomY = (Math.random() - 0.5) * 0.4 * (1 - radius / 55);
-			const randomZ = (Math.random() - 0.5) * 0.9 * (1 - radius / 55);
-			const angle = branchAngle + spinAngle;
+		const dustGeometry = buildSpiralGeometry(DUST_COUNT, "dust");
+		const dustMaterial = createBokehMaterial(0.12, 1);
+		const dust = new THREE.Points(dustGeometry, dustMaterial);
+		dust.frustumCulled = false;
+		spiralGroup.add(dust);
 
-			galaxyPositions[i3] = Math.cos(angle) * radius + randomX;
-			galaxyPositions[i3 + 1] = randomY * 8;
-			galaxyPositions[i3 + 2] = Math.sin(angle) * radius + randomZ;
+		const bulgeGeometry = buildSpiralGeometry(BULGE_COUNT, "bulge");
+		const bulgeMaterial = createBokehMaterial(0.9, 1);
+		const bulge = new THREE.Points(bulgeGeometry, bulgeMaterial);
+		bulge.frustumCulled = false;
+		spiralGroup.add(bulge);
 
-			const mixed = innerColor.clone().lerp(outerColor, radius / 55);
-			galaxyColors[i3] = mixed.r;
-			galaxyColors[i3 + 1] = mixed.g;
-			galaxyColors[i3 + 2] = mixed.b;
+		const grainGeometry = buildSpiralGeometry(PARTICLE_COUNT, "grain");
+		const grainMaterial = createBokehMaterial(1, 1);
+		const grains = new THREE.Points(grainGeometry, grainMaterial);
+		grains.frustumCulled = false;
+		spiralGroup.add(grains);
 
-			// keep galaxy points small; add subtle per-point variation
-			galaxySizes[i] = 0.7 + Math.random() ** 2 * 1.8;
-			galaxyTwinkle[i] = Math.random() * Math.PI * 2;
-		}
-		galaxyGeometry.setAttribute(
-			"position",
-			new THREE.BufferAttribute(galaxyPositions, 3),
+		const halo = radialSprite(
+			[
+				[0, "rgba(190,212,255,0.08)"],
+				[0.4, "rgba(140,170,225,0.028)"],
+				[1, "rgba(120,150,210,0)"],
+			],
+			130,
 		);
-		galaxyGeometry.setAttribute(
-			"color",
-			new THREE.BufferAttribute(galaxyColors, 3),
+		spiralGroup.add(halo);
+
+		const core = radialSprite(
+			[
+				[0, "rgba(255,254,250,1)"],
+				[0.14, "rgba(255,250,238,0.72)"],
+				[0.32, "rgba(240,246,255,0.3)"],
+				[0.6, "rgba(215,230,255,0.08)"],
+				[1, "rgba(200,220,255,0)"],
+			],
+			30,
 		);
-		galaxyGeometry.setAttribute(
-			"aSize",
-			new THREE.BufferAttribute(galaxySizes, 1),
-		);
-		galaxyGeometry.setAttribute(
-			"aTwinkle",
-			new THREE.BufferAttribute(galaxyTwinkle, 1),
-		);
+		spiralGroup.add(core);
 
-		// Use ShaderMaterial (same approach as stars) to avoid square point sprites
-		const galaxyMaterial = new THREE.ShaderMaterial({
-			transparent: true,
-			depthWrite: false,
-			blending: THREE.AdditiveBlending,
-			uniforms: {
-				uTime: { value: 0 },
-				uPixelRatio: { value: renderer.getPixelRatio() },
-			},
-			vertexShader: `
-				attribute float aSize;
-				attribute float aTwinkle;
-				varying vec3 vColor;
-				varying float vTwinkle;
-				uniform float uPixelRatio;
-				uniform float uTime;
+		const starsMaterial = stars.material as THREE.ShaderMaterial;
 
-				void main() {
-					vColor = color;
-					vTwinkle = aTwinkle;
-					vec4 mvPosition = modelViewMatrix * vec4(position, 1.0);
-					float dist = max(1.0, -mvPosition.z);
-					// Slightly smaller than stars; still perspective-aware
-					float size = aSize * uPixelRatio * (38.0 / dist);
-					gl_PointSize = clamp(size, 1.0, 4.0);
-					gl_Position = projectionMatrix * mvPosition;
-				}
-			`,
-			fragmentShader: `
-				varying vec3 vColor;
-				varying float vTwinkle;
-				uniform float uTime;
+		let formationStart = performance.now();
+		let baseRotation = 0;
+		let dragRotation = 0;
+		let spinVelocity = 0;
+		let isPointerDown = false;
+		let lastPointerX = 0;
 
-				void main() {
-					vec2 uv = gl_PointCoord - vec2(0.5);
-					float d = length(uv);
-					// soft circular falloff
-					float core = smoothstep(0.50, 0.12, d);
-					float halo = smoothstep(0.50, 0.00, d) * 0.28;
-
-					float tw = 0.92 + 0.08 * sin(uTime * 0.9 + vTwinkle);
-					float alpha = (core + halo) * tw;
-					if (alpha < 0.02) discard;
-
-					gl_FragColor = vec4(vColor, alpha);
-				}
-			`,
-			vertexColors: true,
-		});
-		const galaxyPoints = new THREE.Points(galaxyGeometry, galaxyMaterial);
-		galaxy.add(galaxyPoints);
-
-		// Planet textures (public/ -> served from /textures/*)
-		const texLoader = new THREE.TextureLoader();
-		const earthMap = texLoader.load("/textures/earth.png");
-		earthMap.colorSpace = THREE.SRGBColorSpace;
-		const marsMap = texLoader.load("/textures/mars.jpg");
-		marsMap.colorSpace = THREE.SRGBColorSpace;
-		const jupiterMap = texLoader.load("/textures/jupiter.jpg");
-		jupiterMap.colorSpace = THREE.SRGBColorSpace;
-		const mercuryMap = texLoader.load("/textures/mercury.jpg");
-		mercuryMap.colorSpace = THREE.SRGBColorSpace;
-		const venusMap = texLoader.load("/textures/venus.jpg");
-		venusMap.colorSpace = THREE.SRGBColorSpace;
-		const saturnMap = texLoader.load("/textures/saturn.jpg");
-		saturnMap.colorSpace = THREE.SRGBColorSpace;
-		const uranusMap = texLoader.load("/textures/uranus.jpg");
-		uranusMap.colorSpace = THREE.SRGBColorSpace;
-		const neptuneMap = texLoader.load("/textures/neptune.jpg");
-		neptuneMap.colorSpace = THREE.SRGBColorSpace;
-
-		const createPlanet = (
-			radius: number,
-			map: THREE.Texture,
-			orbitRadius: number,
-			orbitSpeed: number,
-			rotationSpeed: number,
-			materialTuning?: Partial<
-				Pick<
-					THREE.MeshStandardMaterialParameters,
-					"roughness" | "metalness" | "emissive" | "emissiveIntensity"
-				>
-			>,
-		): Planet => {
-			const pivot = new THREE.Object3D();
-			const geometry = new THREE.SphereGeometry(radius, 48, 48);
-			const materialParams: THREE.MeshStandardMaterialParameters = {
-				map,
-				roughness: materialTuning?.roughness ?? 0.9,
-				metalness: materialTuning?.metalness ?? 0.0,
-			};
-			if (materialTuning?.emissive !== undefined) {
-				materialParams.emissive = materialTuning.emissive;
-			}
-			if (materialTuning?.emissiveIntensity !== undefined) {
-				materialParams.emissiveIntensity = materialTuning.emissiveIntensity;
-			}
-			const material = new THREE.MeshStandardMaterial(materialParams);
-			const mesh = new THREE.Mesh(geometry, material);
-			mesh.position.x = orbitRadius;
-			pivot.add(mesh);
-			galaxy.add(pivot);
-			return { pivot, mesh, orbitSpeed, rotationSpeed };
+		replayRef.current = () => {
+			formationStart = performance.now();
 		};
 
-		// 8 planets (Mercury → Neptune)
-		const planets: Planet[] = [
-			createPlanet(0.7, mercuryMap, 7, 0.42, 0.45, {
-				roughness: 0.98,
-				metalness: 0.0,
-			}),
-			createPlanet(1.05, venusMap, 9, 0.32, 0.12, {
-				roughness: 0.96,
-				metalness: 0.0,
-			}),
-			createPlanet(1.4, earthMap, 11.5, 0.26, 0.35, {
-				roughness: 0.9,
-				metalness: 0.0,
-			}),
-			createPlanet(1.15, marsMap, 14, 0.21, 0.22, {
-				roughness: 0.95,
-				metalness: 0.0,
-			}),
-			createPlanet(2.6, jupiterMap, 20, 0.14, 0.12, {
-				roughness: 0.92,
-				metalness: 0.0,
-			}),
-			createPlanet(2.2, saturnMap, 26, 0.11, 0.11, {
-				roughness: 0.93,
-				metalness: 0.0,
-			}),
-			createPlanet(1.8, uranusMap, 31, 0.085, 0.08, {
-				roughness: 0.94,
-				metalness: 0.0,
-			}),
-			createPlanet(1.9, neptuneMap, 36, 0.07, 0.09, {
-				roughness: 0.94,
-				metalness: 0.0,
-			}),
-		];
-		// Approx. axial tilts (radians)
-		planets[0]?.mesh.rotateZ(THREE.MathUtils.degToRad(0.03)); // Mercury
-		planets[1]?.mesh.rotateZ(THREE.MathUtils.degToRad(177.4)); // Venus (retrograde-ish)
-		planets[2]?.mesh.rotateZ(THREE.MathUtils.degToRad(23.5)); // Earth
-		planets[3]?.mesh.rotateZ(THREE.MathUtils.degToRad(25.2)); // Mars
-		planets[4]?.mesh.rotateZ(THREE.MathUtils.degToRad(3.1)); // Jupiter
-		planets[5]?.mesh.rotateZ(THREE.MathUtils.degToRad(26.7)); // Saturn
-		planets[6]?.mesh.rotateZ(THREE.MathUtils.degToRad(97.8)); // Uranus
-		planets[7]?.mesh.rotateZ(THREE.MathUtils.degToRad(28.3)); // Neptune
+		const onPointerDown = (event: PointerEvent) => {
+			isPointerDown = true;
+			lastPointerX = event.clientX;
+			spinVelocity = 0;
+			setIsDragging(true);
+			renderer.domElement.setPointerCapture(event.pointerId);
+		};
 
-		// Saturn ring (procedural-ish, no external asset)
-		const saturnPivot = planets[5]?.pivot;
-		const saturnMesh = planets[5]?.mesh;
-		let saturnRing: THREE.Mesh | undefined;
-		if (saturnPivot && saturnMesh) {
-			const ringCanvas = document.createElement("canvas");
-			ringCanvas.width = 512;
-			ringCanvas.height = 64;
-			const ctx = ringCanvas.getContext("2d");
-			if (ctx) {
-				const g = ctx.createLinearGradient(0, 0, ringCanvas.width, 0);
-				// subtle banding similar to Saturn rings
-				g.addColorStop(0.0, "rgba(255,255,255,0)");
-				g.addColorStop(0.08, "rgba(240,220,190,0.10)");
-				g.addColorStop(0.18, "rgba(255,245,220,0.22)");
-				g.addColorStop(0.35, "rgba(220,200,170,0.18)");
-				g.addColorStop(0.55, "rgba(255,245,220,0.25)");
-				g.addColorStop(0.72, "rgba(210,190,160,0.16)");
-				g.addColorStop(0.9, "rgba(255,245,220,0.10)");
-				g.addColorStop(1.0, "rgba(255,255,255,0)");
-				ctx.fillStyle = g;
-				ctx.fillRect(0, 0, ringCanvas.width, ringCanvas.height);
+		const onPointerMove = (event: PointerEvent) => {
+			if (!isPointerDown) return;
+			const delta = (event.clientX - lastPointerX) * 0.005;
+			dragRotation += delta;
+			spinVelocity = delta;
+			lastPointerX = event.clientX;
+		};
 
-				// add thin gaps
-				ctx.globalCompositeOperation = "destination-out";
-				ctx.fillStyle = "rgba(0,0,0,0.35)";
-				for (let x = 40; x < ringCanvas.width; x += 70) {
-					ctx.fillRect(x, 0, 2, ringCanvas.height);
-				}
-				ctx.globalCompositeOperation = "source-over";
-			}
-			const ringTex = new THREE.CanvasTexture(ringCanvas);
-			ringTex.colorSpace = THREE.SRGBColorSpace;
-			const ringGeo = new THREE.RingGeometry(2.8, 4.6, 96, 2);
-			const ringMat = new THREE.MeshBasicMaterial({
-				map: ringTex,
-				transparent: true,
-				opacity: 0.75,
-				side: THREE.DoubleSide,
-				depthWrite: false,
-				blending: THREE.AdditiveBlending,
-			});
-			saturnRing = new THREE.Mesh(ringGeo, ringMat);
-			saturnRing.rotation.x = THREE.MathUtils.degToRad(74); // tilt a bit
-			saturnRing.position.copy(saturnMesh.position);
-			saturnPivot.add(saturnRing);
-		}
+		const onPointerUp = (event: PointerEvent) => {
+			if (!isPointerDown) return;
+			isPointerDown = false;
+			setIsDragging(false);
+			renderer.domElement.releasePointerCapture(event.pointerId);
+		};
 
-		// Simple atmosphere glow for Earth
-		const earth = planets[0]?.mesh;
-		let atmosphere: THREE.Mesh | undefined;
-		if (earth) {
-			const atmoGeo = new THREE.SphereGeometry(1.4 * 1.05, 48, 48);
-			const atmoMat = new THREE.MeshBasicMaterial({
-				color: 0x66b3ff,
-				transparent: true,
-				opacity: 0.08,
-				blending: THREE.AdditiveBlending,
-				depthWrite: false,
-			});
-			atmosphere = new THREE.Mesh(atmoGeo, atmoMat);
-			atmosphere.position.copy(earth.position);
-			planets[0]?.pivot.add(atmosphere);
-		}
+		const onKeyDown = (event: KeyboardEvent) => {
+			if (event.key === "ArrowLeft") spinVelocity += 0.012;
+			if (event.key === "ArrowRight") spinVelocity -= 0.012;
+		};
+
+		renderer.domElement.addEventListener("pointerdown", onPointerDown);
+		renderer.domElement.addEventListener("pointermove", onPointerMove);
+		renderer.domElement.addEventListener("pointerup", onPointerUp);
+		renderer.domElement.addEventListener("pointercancel", onPointerUp);
+		window.addEventListener("keydown", onKeyDown);
 
 		const resize = () => {
 			const width = Math.max(1, container.clientWidth);
 			const height = Math.max(1, container.clientHeight);
 			renderer.setSize(width, height, false);
-			starsMaterial.uniforms.uPixelRatio.value = renderer.getPixelRatio();
-			galaxyMaterial.uniforms.uPixelRatio.value = renderer.getPixelRatio();
+			const pixelRatio = renderer.getPixelRatio();
+			grainMaterial.uniforms.uPixelRatio.value = pixelRatio;
+			dustMaterial.uniforms.uPixelRatio.value = pixelRatio;
+			bulgeMaterial.uniforms.uPixelRatio.value = pixelRatio;
+			starsMaterial.uniforms.uPixelRatio.value = pixelRatio;
 			camera.aspect = width / height;
 			camera.updateProjectionMatrix();
+
+			// Keep the spiral framed the same way on narrow viewports.
+			const fit = Math.min(1, Math.max(0.62, width / 1100));
+			spiralGroup.scale.setScalar(fit);
 		};
 
 		resize();
@@ -450,20 +466,29 @@ export function SpaceBackground() {
 
 		const clock = new THREE.Clock();
 		let rafId = 0;
+
 		const animate = () => {
 			rafId = window.requestAnimationFrame(animate);
 			const t = clock.getElapsedTime();
+			const formation = Math.min(
+				1,
+				(performance.now() - formationStart) / 1000 / INTRO_DURATION,
+			);
 
-			starsMaterial.uniforms.uTime.value = t;
-			galaxyMaterial.uniforms.uTime.value = t;
-			galaxy.rotation.y = t * 0.08;
-			galaxy.rotation.z = t * 0.03;
-			stars.rotation.y = t * 0.01;
-
-			for (const p of planets) {
-				p.pivot.rotation.y = t * p.orbitSpeed;
-				p.mesh.rotation.y = t * p.rotationSpeed;
+			for (const material of [grainMaterial, dustMaterial, bulgeMaterial]) {
+				material.uniforms.uTime.value = t;
+				material.uniforms.uFormation.value = formation;
 			}
+
+			if (!isPointerDown) {
+				dragRotation += spinVelocity;
+				spinVelocity *= 0.94;
+			}
+			baseRotation += 0.0011;
+			spiralGroup.rotation.z = baseRotation + dragRotation;
+
+			(core.material as THREE.SpriteMaterial).opacity = formation ** 2;
+			(halo.material as THREE.SpriteMaterial).opacity = formation;
 
 			renderer.render(scene, camera);
 		};
@@ -472,37 +497,28 @@ export function SpaceBackground() {
 		return () => {
 			window.cancelAnimationFrame(rafId);
 			ro.disconnect();
+			replayRef.current = null;
+			renderer.domElement.removeEventListener("pointerdown", onPointerDown);
+			renderer.domElement.removeEventListener("pointermove", onPointerMove);
+			renderer.domElement.removeEventListener("pointerup", onPointerUp);
+			renderer.domElement.removeEventListener("pointercancel", onPointerUp);
+			window.removeEventListener("keydown", onKeyDown);
 
-			for (const p of planets) {
-				p.mesh.geometry.dispose();
-				(p.mesh.material as THREE.Material).dispose();
+			for (const sprite of [halo, core]) {
+				const material = sprite.material as THREE.SpriteMaterial;
+				material.map?.dispose();
+				material.dispose();
 			}
-			if (saturnRing) {
-				saturnRing.geometry.dispose();
-				(saturnRing.material as THREE.Material).dispose();
-				const tex = (saturnRing.material as THREE.MeshBasicMaterial).map;
-				tex?.dispose();
-			}
-			if (atmosphere) {
-				atmosphere.geometry.dispose();
-				(atmosphere.material as THREE.Material).dispose();
-			}
-
-			starsGeometry.dispose();
+			stars.geometry.dispose();
 			starsMaterial.dispose();
-			galaxyGeometry.dispose();
-			galaxyMaterial.dispose();
-			earthMap.dispose();
-			marsMap.dispose();
-			jupiterMap.dispose();
-			mercuryMap.dispose();
-			venusMap.dispose();
-			saturnMap.dispose();
-			uranusMap.dispose();
-			neptuneMap.dispose();
+			grainGeometry.dispose();
+			grainMaterial.dispose();
+			dustGeometry.dispose();
+			dustMaterial.dispose();
+			bulgeGeometry.dispose();
+			bulgeMaterial.dispose();
 			renderer.dispose();
 
-			// Remove canvas
 			if (renderer.domElement.parentElement === container) {
 				container.removeChild(renderer.domElement);
 			}
@@ -512,8 +528,35 @@ export function SpaceBackground() {
 	return (
 		<div
 			ref={containerRef}
-			className="pointer-events-none absolute inset-0 z-0"
-			aria-hidden="true"
+			className={`absolute inset-0 z-0 ${isDragging ? "cursor-grabbing" : "cursor-grab"}`}
+			aria-label="Drag or use arrow keys to rotate the star field"
+			role="img"
 		/>
+	);
+}
+
+export function ReplayButton({ onClick }: { onClick: () => void }) {
+	return (
+		<button
+			type="button"
+			onClick={onClick}
+			className="absolute bottom-6 right-6 z-20 flex size-11 items-center justify-center rounded-full border border-white/15 bg-black/35 text-white/80 backdrop-blur-sm transition hover:border-white/30 hover:bg-black/55 hover:text-white"
+			aria-label="Replay spiral field animation"
+		>
+			<svg
+				width="18"
+				height="18"
+				viewBox="0 0 24 24"
+				fill="none"
+				stroke="currentColor"
+				strokeWidth="1.8"
+				strokeLinecap="round"
+				strokeLinejoin="round"
+				aria-hidden="true"
+			>
+				<path d="M3 12a9 9 0 1 0 2.4-6.1" />
+				<path d="M3 4v5h5" />
+			</svg>
+		</button>
 	);
 }
