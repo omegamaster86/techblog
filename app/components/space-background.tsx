@@ -4,15 +4,23 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import * as THREE from "three";
 
 const PARTICLE_BUDGET = {
-	high: { grain: 12000, bulge: 2200, dust: 4000, stars: 900 },
-	medium: { grain: 8000, bulge: 1500, dust: 2600, stars: 600 },
-	low: { grain: 5000, bulge: 900, dust: 1600, stars: 380 },
+	high: { grain: 18000, bulge: 3200, dust: 7200, haze: 2800, stars: 900 },
+	medium: { grain: 12000, bulge: 2200, dust: 4600, haze: 1800, stars: 600 },
+	low: { grain: 7500, bulge: 1400, dust: 2800, haze: 1000, stars: 380 },
 } as const;
 
 const ARM_COUNT = 2;
-const TURNS = 2.35;
-const INNER_RADIUS = 5.5;
-const OUTER_RADIUS = 52;
+/** Full rotations each arm sweeps from the bar tip to the outer rim. */
+const MAX_TURNS = 2.05;
+/** Growth constant for r = r0 * exp(b * theta). Wider spacing toward the rim. */
+const SPIRAL_GROWTH = 0.152;
+/** Central bar length and half-width for a barred-spiral nucleus. */
+const BAR_LENGTH = 5.6;
+const BAR_HALF_WIDTH = 1.15;
+const INNER_RADIUS = 4.8;
+const OUTER_RADIUS = 50;
+/** Rotate arms so they open toward ~11 o'clock / ~5 o'clock like the reference. */
+const ARM_PHASE = Math.PI * 0.62;
 /** Astra shows the field almost immediately; a short beat before convergence. */
 const INTRO_DELAY = 0.35;
 const INTRO_DURATION = 4.2;
@@ -21,14 +29,14 @@ const RETURN_SPRING = 2.8;
 /** Laps per second for the light that runs inward along the arms. */
 const FLOW_SPEED = 0.09;
 /** How far ahead of the travelling head a particle still catches light. */
-const LIGHT_REACH = 0.17;
+const LIGHT_REACH = 0.22;
 /** Fraction of the path that keeps a fading glow behind a head. */
-const TRAIL_LENGTH = 0.06;
+const TRAIL_LENGTH = 0.09;
 /** Offsets of the bright knots that travel along the arms together. */
 const STAR_KNOTS = [0.15, 0.28, 0.38, 0.52, 0.62, 0.84, 0.94];
 const TWINKLE_SPEED = 0.62;
 /** Spiral tilt the field flattens out of while it converges. */
-const INTRO_TILT = 0.5;
+const INTRO_TILT = 0.62;
 /** Radians per second the settled field keeps turning about its own axis. */
 const SPIN_SPEED = 0.2;
 
@@ -56,14 +64,22 @@ function getPixelRatioCap(tier: QualityTier): number {
 }
 
 /**
- * Near-Archimedean spiral with a slight outward bias, so inner turns stay tight
- * while the outer sweep opens up.
+ * Logarithmic barred-spiral arm: tight inner windings that open toward the rim,
+ * matching the reference galaxy silhouette instead of even concentric rings.
  */
 function spiralPoint(arm: number, t: number) {
-	const theta = t * TURNS * Math.PI * 2;
-	const radius = INNER_RADIUS + (OUTER_RADIUS - INNER_RADIUS) * t ** 1.22;
-	const angle = theta + (arm / ARM_COUNT) * Math.PI * 2;
-	return { radius, angle };
+	const theta = t * MAX_TURNS * Math.PI * 2;
+	const r0 = BAR_LENGTH * 0.92;
+	const radius = Math.min(OUTER_RADIUS, r0 * Math.exp(SPIRAL_GROWTH * theta));
+	const angle = theta + ARM_PHASE + (arm / ARM_COUNT) * Math.PI * 2;
+	return { radius, angle, theta };
+}
+
+/** Bias samples toward the luminous inner windings on a log spiral. */
+function sampleArmT(kind: FieldKind) {
+	if (kind === "bulge") return Math.random() ** 2;
+	if (kind === "dust") return Math.random() ** 1.05;
+	return Math.random() ** 1.28;
 }
 
 /** Irregular knots so the arms read as clumped dust rather than even beading. */
@@ -164,10 +180,10 @@ const BOKEH_VERTEX = `
 			float knot = fract(uHead + uKnots[k]);
 			float toStar = abs(aOrbit - knot);
 			toStar = min(toStar, 1.0 - toStar);
-			float lit = 1.0 - smoothstep(uLightReach * 0.08, uLightReach, toStar);
+			float lit = 1.0 - smoothstep(uLightReach * 0.05, uLightReach, toStar);
 			float behind = fract(aOrbit - knot);
 			float trail = 1.0 - smoothstep(0.0, uTrailLength, behind);
-			illumination = max(illumination, max(lit * lit, trail * trail * 0.68));
+			illumination = max(illumination, max(lit * lit * lit, trail * trail * 0.82));
 		}
 
 		// Slow stream along the arm, each particle fading in and out of its cycle.
@@ -236,7 +252,7 @@ const BOKEH_FRAGMENT = `
 	}
 `;
 
-type FieldKind = "grain" | "dust" | "bulge";
+type FieldKind = "grain" | "dust" | "bulge" | "haze";
 
 function buildSpiralGeometry(count: number, kind: FieldKind) {
 	const dust = kind === "dust";
@@ -261,22 +277,42 @@ function buildSpiralGeometry(count: number, kind: FieldKind) {
 	for (let i = 0; i < count; i++) {
 		const i3 = i * 3;
 		const arm = i % ARM_COUNT;
-		const t = kind === "bulge" ? Math.random() ** 2 : Math.random() ** 0.82;
+		const t = sampleArmT(kind);
 		const { radius, angle } = spiralPoint(arm, t);
 		const clump = armClumping(t, arm);
 
 		if (kind === "bulge") {
-			// Dense luminous core: a flattened gaussian cloud around the centre.
-			const bulgeRadius = Math.abs(gaussian()) * 2.1;
-			const bulgeAngle = Math.random() * Math.PI * 2;
-			positions[i3] = Math.cos(bulgeAngle) * bulgeRadius;
-			positions[i3 + 1] = Math.sin(bulgeAngle) * bulgeRadius;
-			positions[i3 + 2] = gaussian() * 0.8;
-		} else {
-			// Keep grains hugging the arm centreline; the ribbon widens as it unwinds.
-			const width = (dust ? 1.6 : 0.62) * (0.4 + radius * 0.06);
+			// Barred nucleus: a bright bar through the core plus a tight central bulge.
+			if (Math.random() < 0.58) {
+				const along = (Math.random() - 0.5) * BAR_LENGTH * 2.1;
+				positions[i3] = along;
+				positions[i3 + 1] = gaussian() * BAR_HALF_WIDTH;
+				positions[i3 + 2] = gaussian() * 0.45;
+			} else {
+				const bulgeRadius = Math.abs(gaussian()) * 2.4;
+				const bulgeAngle = Math.random() * Math.PI * 2;
+				positions[i3] = Math.cos(bulgeAngle) * bulgeRadius;
+				positions[i3 + 1] = Math.sin(bulgeAngle) * bulgeRadius;
+				positions[i3 + 2] = gaussian() * 0.65;
+			}
+		} else if (kind === "haze") {
+			// Faint inter-arm nebulosity so the field does not read as hollow rings.
+			const { radius: hazeRadius, angle: baseAngle } = spiralPoint(arm, t);
+			const hazeAngle = baseAngle + Math.PI / ARM_COUNT;
+			const width = 3.4 * (0.55 + hazeRadius * 0.05);
 			const offset = gaussian() * width;
-			const alongJitter = gaussian() * width * 0.6;
+			positions[i3] =
+				Math.cos(hazeAngle) * hazeRadius +
+				Math.cos(hazeAngle + Math.PI / 2) * offset;
+			positions[i3 + 1] =
+				Math.sin(hazeAngle) * hazeRadius +
+				Math.sin(hazeAngle + Math.PI / 2) * offset;
+			positions[i3 + 2] = gaussian() * 2.2;
+		} else {
+			// Ribbon widens with radius; dust is much softer and broader than grain.
+			const width = (dust ? 2.5 : 0.88) * (0.52 + radius * 0.055);
+			const offset = gaussian() * width;
+			const alongJitter = gaussian() * width * 0.55;
 			positions[i3] =
 				Math.cos(angle) * radius +
 				Math.cos(angle + Math.PI / 2) * offset +
@@ -285,24 +321,26 @@ function buildSpiralGeometry(count: number, kind: FieldKind) {
 				Math.sin(angle) * radius +
 				Math.sin(angle + Math.PI / 2) * offset +
 				Math.sin(angle) * alongJitter;
-			positions[i3 + 2] = gaussian() * (dust ? 1.6 : 0.5);
+			positions[i3 + 2] = gaussian() * (dust ? 2.0 : 0.62);
 		}
 
 		let color: THREE.Color;
 		let sizeBias = 1;
 		const roll = Math.random();
-		// Reference palette: ~70% white, ~20% cool, ~10% warm.
-		if (kind === "bulge") {
-			color = roll < 0.14 ? amber : white;
-		} else if (roll < 0.07) {
+		if (kind === "haze") {
+			color = roll < 0.35 ? blue : white;
+			sizeBias = 0.8;
+		} else if (kind === "bulge") {
+			color = roll < 0.24 ? amber : white;
+		} else if (roll < 0.08) {
 			color = ember;
 			sizeBias = 0.95;
-		} else if (roll < 0.1) {
+		} else if (roll < 0.14) {
 			color = amber;
-		} else if (roll < 0.2) {
+		} else if (roll < 0.28) {
 			color = cyan;
 			sizeBias = 0.86;
-		} else if (roll < 0.3) {
+		} else if (roll < 0.42) {
 			color = blue;
 			sizeBias = 0.9;
 		} else {
@@ -313,8 +351,11 @@ function buildSpiralGeometry(count: number, kind: FieldKind) {
 		colors[i3 + 1] = color.g;
 		colors[i3 + 2] = color.b;
 
-		if (dust) {
-			sizes[i] = (21 + Math.random() * 34) * clump;
+		if (kind === "haze") {
+			sizes[i] = (14 + Math.random() * 24) * clump;
+			blurs[i] = 1;
+		} else if (dust) {
+			sizes[i] = (30 + Math.random() * 46) * clump;
 			blurs[i] = 1;
 		} else if (kind === "bulge") {
 			sizes[i] = 0.5 + Math.random() ** 3 * 2.4;
@@ -534,20 +575,32 @@ export function SpaceBackground({
 		container.appendChild(renderer.domElement);
 
 		const scene = new THREE.Scene();
-		const camera = new THREE.PerspectiveCamera(52, 1, 0.1, 600);
-		camera.position.set(0, 0, 78);
+		const camera = new THREE.PerspectiveCamera(48, 1, 0.1, 600);
+		camera.position.set(0, 5.5, 76);
 
 		const stars = createStarField(counts.stars);
 		scene.add(stars);
 
 		const spiralGroup = new THREE.Group();
-		spiralGroup.rotation.set(0.08, -0.06, -0.025);
+		spiralGroup.rotation.set(0.38, -0.14, -0.04);
 		scene.add(spiralGroup);
 
+		const hazeGeometry = buildSpiralGeometry(counts.haze, "haze");
+		const hazeMaterial = createBokehMaterial(0.05, {
+			ambient: 0.8,
+			starBrightness: 0.35,
+			driftDistance: 1.6,
+			driftSpeed: 0.03,
+			soft: 1,
+		});
+		const haze = new THREE.Points(hazeGeometry, hazeMaterial);
+		haze.frustumCulled = false;
+		spiralGroup.add(haze);
+
 		const dustGeometry = buildSpiralGeometry(counts.dust, "dust");
-		const dustMaterial = createBokehMaterial(0.08, {
-			ambient: 0.62,
-			starBrightness: 0.45,
+		const dustMaterial = createBokehMaterial(0.19, {
+			ambient: 0.74,
+			starBrightness: 0.58,
 			driftDistance: 2.4,
 			driftSpeed: 0.04,
 			soft: 1,
@@ -557,7 +610,7 @@ export function SpaceBackground({
 		spiralGroup.add(dust);
 
 		const bulgeGeometry = buildSpiralGeometry(counts.bulge, "bulge");
-		const bulgeMaterial = createBokehMaterial(0.7, {
+		const bulgeMaterial = createBokehMaterial(0.92, {
 			ambient: 1,
 			starBrightness: 0,
 			driftDistance: 0,
@@ -569,8 +622,8 @@ export function SpaceBackground({
 
 		const grainGeometry = buildSpiralGeometry(counts.grain, "grain");
 		const grainMaterial = createBokehMaterial(1, {
-			ambient: 0.7,
-			starBrightness: 0.62,
+			ambient: 0.68,
+			starBrightness: 0.72,
 			driftDistance: 1.1,
 			driftSpeed: 0.04,
 		});
@@ -591,12 +644,13 @@ export function SpaceBackground({
 		const core = radialSprite(
 			[
 				[0, "rgba(255,254,250,1)"],
-				[0.14, "rgba(255,250,238,0.72)"],
-				[0.32, "rgba(240,246,255,0.3)"],
-				[0.6, "rgba(215,230,255,0.08)"],
+				[0.1, "rgba(255,252,245,0.95)"],
+				[0.22, "rgba(255,248,235,0.78)"],
+				[0.45, "rgba(242,240,252,0.4)"],
+				[0.75, "rgba(218,228,255,0.1)"],
 				[1, "rgba(200,220,255,0)"],
 			],
-			30,
+			38,
 		);
 		spiralGroup.add(core);
 
@@ -686,6 +740,7 @@ export function SpaceBackground({
 			grainMaterial.uniforms.uPixelRatio.value = pixelRatio;
 			dustMaterial.uniforms.uPixelRatio.value = pixelRatio;
 			bulgeMaterial.uniforms.uPixelRatio.value = pixelRatio;
+			hazeMaterial.uniforms.uPixelRatio.value = pixelRatio;
 			starsMaterial.uniforms.uPixelRatio.value = pixelRatio;
 			camera.aspect = width / height;
 			camera.updateProjectionMatrix();
@@ -694,7 +749,12 @@ export function SpaceBackground({
 			// intro draws them from has to track the visible area.
 			const visibleHeight =
 				2 * Math.tan((camera.fov * Math.PI) / 360) * camera.position.z;
-			for (const material of [grainMaterial, dustMaterial, bulgeMaterial]) {
+			for (const material of [
+				grainMaterial,
+				dustMaterial,
+				bulgeMaterial,
+				hazeMaterial,
+			]) {
 				material.uniforms.uScatterSize.value.set(
 					visibleHeight * camera.aspect,
 					visibleHeight,
@@ -702,9 +762,9 @@ export function SpaceBackground({
 			}
 
 			// Keep the spiral centered and proportionally framed on all viewports.
-			const widthFit = width / 1100;
-			const heightFit = height / 700;
-			const fit = Math.min(1, Math.max(0.68, Math.min(widthFit, heightFit)));
+			const widthFit = width / 1050;
+			const heightFit = height / 680;
+			const fit = Math.min(1, Math.max(0.72, Math.min(widthFit, heightFit)));
 			spiralGroup.scale.setScalar(fit);
 		};
 
@@ -731,7 +791,12 @@ export function SpaceBackground({
 			// The light runs from the rim toward the core, wrapping around.
 			head = (head - delta * FLOW_SPEED + 1) % 1;
 
-			for (const material of [grainMaterial, dustMaterial, bulgeMaterial]) {
+			for (const material of [
+				grainMaterial,
+				dustMaterial,
+				bulgeMaterial,
+				hazeMaterial,
+			]) {
 				material.uniforms.uTime.value = t;
 				material.uniforms.uFormation.value = formation;
 				material.uniforms.uHead.value = head;
@@ -750,11 +815,11 @@ export function SpaceBackground({
 			// The field never comes to rest: it keeps turning about its axis with a
 			// slow wobble, so the arms drift past the frame after they have formed.
 			if (!reducedMotion) spin = (spin + delta * SPIN_SPEED) % (Math.PI * 2);
-			const wobbleX = reducedMotion ? 0 : 0.08 * Math.sin(t * 0.22);
-			const wobbleY = reducedMotion ? 0 : 0.14 * Math.cos(t * 0.28);
-			spiralGroup.rotation.x = 0.08 + wobbleX + currentRotationX;
-			spiralGroup.rotation.y = -0.06 + wobbleY + currentRotationY;
-			spiralGroup.rotation.z = -0.025 + spin;
+			const wobbleX = reducedMotion ? 0 : 0.06 * Math.sin(t * 0.22);
+			const wobbleY = reducedMotion ? 0 : 0.1 * Math.cos(t * 0.28);
+			spiralGroup.rotation.x = 0.38 + wobbleX + currentRotationX;
+			spiralGroup.rotation.y = -0.14 + wobbleY + currentRotationY;
+			spiralGroup.rotation.z = -0.04 + spin;
 
 			(core.material as THREE.SpriteMaterial).opacity = formation ** 2 * 0.8;
 			(halo.material as THREE.SpriteMaterial).opacity = formation;
@@ -785,6 +850,8 @@ export function SpaceBackground({
 			grainMaterial.dispose();
 			dustGeometry.dispose();
 			dustMaterial.dispose();
+			hazeGeometry.dispose();
+			hazeMaterial.dispose();
 			bulgeGeometry.dispose();
 			bulgeMaterial.dispose();
 			renderer.dispose();
