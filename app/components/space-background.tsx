@@ -5,13 +5,29 @@ import * as THREE from "three";
 
 const PARTICLE_COUNT = 12000;
 const BULGE_COUNT = 2200;
-const DUST_COUNT = 1600;
+const DUST_COUNT = 4000;
 const STAR_COUNT = 900;
 const ARM_COUNT = 2;
-const TURNS = 2.2;
-const INNER_RADIUS = 4;
+const TURNS = 2.35;
+const INNER_RADIUS = 5.5;
 const OUTER_RADIUS = 52;
-const INTRO_DURATION = 3.4;
+const INTRO_DELAY = 2.2;
+const INTRO_DURATION = 5.5;
+const FOLLOW_DAMPING = 6;
+const RETURN_SPRING = 2.8;
+/** Laps per second for the light that runs inward along the arms. */
+const FLOW_SPEED = 0.12;
+/** How far ahead of the travelling head a particle still catches light. */
+const LIGHT_REACH = 0.2;
+/** Fraction of the path that keeps a fading glow behind a head. */
+const TRAIL_LENGTH = 0.08;
+/** Offsets of the bright knots that travel along the arms together. */
+const STAR_KNOTS = [0.15, 0.28, 0.38, 0.52, 0.62, 0.84, 0.94];
+const TWINKLE_SPEED = 0.62;
+/** Spiral tilt the field flattens out of while it converges. */
+const INTRO_TILT = 0.5;
+/** Radians per second the settled field keeps turning about its own axis. */
+const SPIN_SPEED = 0.288;
 
 /**
  * Near-Archimedean spiral with a slight outward bias, so inner turns stay tight
@@ -43,10 +59,17 @@ function gaussian() {
 }
 
 const BOKEH_VERTEX = `
+	#define PI 3.14159265359
+
 	attribute float aSize;
 	attribute float aT;
 	attribute float aTwinkle;
 	attribute float aBlur;
+	attribute float aOrbit;
+	attribute float aSeed;
+	attribute float aTravel;
+	attribute vec3 aScatter;
+	attribute vec3 aTangent;
 	varying vec3 vColor;
 	varying float vAlpha;
 	varying float vBlur;
@@ -55,32 +78,105 @@ const BOKEH_VERTEX = `
 	uniform float uFormation;
 	uniform float uSizeScale;
 	uniform float uOpacity;
+	uniform float uAmbient;
+	uniform float uStarBrightness;
+	uniform float uHead;
+	uniform float uKnots[${STAR_KNOTS.length}];
+	uniform float uLightReach;
+	uniform float uTrailLength;
+	uniform float uDriftSpeed;
+	uniform float uDriftDistance;
+	uniform vec2 uScatterSize;
+	uniform float uTilt;
+
+	/** Fade in quickly, then keep gaining presence as the field settles. */
+	float revealProgress(float progress, float seed) {
+		float delay = seed * 0.015;
+		return smoothstep(delay, 0.14 + delay, progress)
+			* mix(0.2, 1.0, smoothstep(0.2, 1.0, progress));
+	}
+
+	/**
+	 * Every particle starts scattered across the frame and swirls into its slot
+	 * on its own schedule, arcing sideways before it lands.
+	 */
+	vec3 introMotion(
+		vec3 target, vec3 scattered, float progress, float seed, float travelSeed
+	) {
+		if (progress >= 1.0) return target;
+		float start = 0.14 + seed * 0.18;
+		float duration = 0.58 + travelSeed * 0.1;
+		float local = clamp((progress - start) / duration, 0.0, 1.0);
+		float smoothPull =
+			local * local * local * (local * (local * 6.0 - 15.0) + 10.0);
+		float pull = mix(smoothPull, sin(smoothPull * PI * 0.5), 0.5);
+		float angle = sin(pull * PI) * (0.44 + seed * 0.22);
+		float c = cos(angle);
+		float s = sin(angle);
+		vec3 orbiting = vec3(
+			scattered.x * c - scattered.y * s,
+			scattered.x * s + scattered.y * c,
+			scattered.z
+		);
+		return mix(orbiting, target, pull);
+	}
+
+	/** Rotates the disc about its own X axis, so it can flatten as it forms. */
+	vec3 tiltSpiral(vec3 p, float angle) {
+		float c = cos(angle);
+		float s = sin(angle);
+		return vec3(p.x, p.y * c - p.z * s, p.y * s + p.z * c);
+	}
 
 	void main() {
-		vColor = color;
 		vBlur = aBlur;
 
-		// Particles swirl inward into their final spiral slot, staggered from the core outward.
-		float local = clamp((uFormation - aT * 0.48) / 0.52, 0.0, 1.0);
-		float ease = 1.0 - pow(1.0 - local, 3.0);
+		// A row of bright knots runs inward along the arms; particles flare as one
+		// passes and keep a shorter glow in its wake.
+		float illumination = 0.0;
+		for (int k = 0; k < ${STAR_KNOTS.length}; k++) {
+			float knot = fract(uHead + uKnots[k]);
+			float toStar = abs(aOrbit - knot);
+			toStar = min(toStar, 1.0 - toStar);
+			float lit = 1.0 - smoothstep(uLightReach * 0.08, uLightReach, toStar);
+			float behind = fract(aOrbit - knot);
+			float trail = 1.0 - smoothstep(0.0, uTrailLength, behind);
+			illumination = max(illumination, max(lit * lit, trail * trail * 0.68));
+		}
 
-		float radius = length(position.xy);
-		float angle = atan(position.y, position.x);
-		float animRadius = mix(radius * 2.15, radius, ease);
-		float animAngle = angle + (1.0 - ease) * 1.6;
-		vec3 animated = vec3(
-			cos(animAngle) * animRadius,
-			sin(animAngle) * animRadius,
-			position.z * ease
+		// Slow stream along the arm, each particle fading in and out of its cycle.
+		float driftCycle = fract(aSeed + uTime * uDriftSpeed);
+		float driftFade = smoothstep(0.0, 0.1, driftCycle)
+			* (1.0 - smoothstep(0.9, 1.0, driftCycle));
+		vec3 basePosition =
+			position - aTangent * (driftCycle - 0.5) * uDriftDistance;
+
+		float reveal = revealProgress(uFormation, aSeed);
+		vec3 scattered = vec3(aScatter.xy * uScatterSize, aScatter.z * 8.0);
+		vec3 animated = introMotion(
+			tiltSpiral(basePosition, uTilt * (1.0 - uFormation)),
+			scattered,
+			uFormation,
+			aSeed,
+			aTravel
 		);
 
 		vec4 mvPosition = modelViewMatrix * vec4(animated, 1.0);
 		float dist = max(1.0, -mvPosition.z);
-		gl_PointSize = clamp(aSize * uSizeScale * uPixelRatio * (78.0 / dist), 1.0, 160.0);
+		gl_PointSize = clamp(
+			aSize * uSizeScale * uPixelRatio * (78.0 / dist) * sqrt(reveal),
+			1.0,
+			160.0
+		);
 		gl_Position = projectionMatrix * mvPosition;
 
-		float twinkle = 0.82 + 0.18 * sin(uTime * 0.9 + aTwinkle);
-		vAlpha = ease * twinkle * uOpacity;
+		float twinkle = 0.82 + 0.18 * sin(uTime * ${TWINKLE_SPEED} + aTwinkle);
+		vColor = color * (uAmbient + illumination * uStarBrightness);
+		vAlpha = uOpacity
+			* (0.22 + illumination * 0.78)
+			* mix(1.0, driftFade, step(0.0001, uDriftSpeed))
+			* twinkle
+			* reveal;
 	}
 `;
 
@@ -103,7 +199,7 @@ const BOKEH_FRAGMENT = `
 
 		float disc = 1.0 - smoothstep(1.0 - vBlur * 0.85 - 0.08, 1.0, d);
 		float rim = smoothstep(0.55, 0.95, d) * (1.0 - smoothstep(0.95, 1.0, d)) * vBlur * 0.45;
-		float core = exp(-d * d * mix(9.0, 2.2, vBlur));
+		float core = exp(-d * d * mix(12.0, 2.6, vBlur));
 		float bokeh = disc * mix(0.35, 0.9, vBlur) + core + rim;
 		float haze = exp(-d * d * 3.2) * (1.0 - smoothstep(0.7, 1.0, d));
 
@@ -124,11 +220,17 @@ function buildSpiralGeometry(count: number, kind: FieldKind) {
 	const blurs = new Float32Array(count);
 	const ts = new Float32Array(count);
 	const twinkles = new Float32Array(count);
+	const orbits = new Float32Array(count);
+	const seeds = new Float32Array(count);
+	const travels = new Float32Array(count);
+	const scatters = new Float32Array(count * 3);
+	const tangents = new Float32Array(count * 3);
 
-	const white = new THREE.Color("#ffffff");
-	const coolWhite = new THREE.Color("#dbe8ff");
-	const blue = new THREE.Color("#b6cdea");
-	const amber = new THREE.Color("#e8a86a");
+	const white = new THREE.Color("#f7f6f6");
+	const cyan = new THREE.Color("#6dcbf4");
+	const blue = new THREE.Color("#7ab1fe");
+	const ember = new THREE.Color("#f87915");
+	const amber = new THREE.Color("#fa994c");
 
 	for (let i = 0; i < count; i++) {
 		const i3 = i * 3;
@@ -139,7 +241,7 @@ function buildSpiralGeometry(count: number, kind: FieldKind) {
 
 		if (kind === "bulge") {
 			// Dense luminous core: a flattened gaussian cloud around the centre.
-			const bulgeRadius = Math.abs(gaussian()) * 2.6;
+			const bulgeRadius = Math.abs(gaussian()) * 2.1;
 			const bulgeAngle = Math.random() * Math.PI * 2;
 			positions[i3] = Math.cos(bulgeAngle) * bulgeRadius;
 			positions[i3 + 1] = Math.sin(bulgeAngle) * bulgeRadius;
@@ -163,16 +265,21 @@ function buildSpiralGeometry(count: number, kind: FieldKind) {
 		let color: THREE.Color;
 		let sizeBias = 1;
 		const roll = Math.random();
+		// Weighted like the reference field: mostly near-white, with a warm and a
+		// cool minority in roughly equal measure.
 		if (kind === "bulge") {
-			color = roll < 0.3 ? coolWhite : white;
-		} else if (roll < 0.14) {
+			color = roll < 0.2 ? amber : white;
+		} else if (roll < 0.09) {
+			color = ember;
+			sizeBias = 0.95;
+		} else if (roll < 0.18) {
 			color = amber;
-			sizeBias = 0.72;
-		} else if (roll < 0.32) {
+		} else if (roll < 0.31) {
+			color = cyan;
+			sizeBias = 0.86;
+		} else if (roll < 0.46) {
 			color = blue;
 			sizeBias = 0.9;
-		} else if (roll < 0.6) {
-			color = coolWhite;
 		} else {
 			color = white;
 		}
@@ -182,20 +289,38 @@ function buildSpiralGeometry(count: number, kind: FieldKind) {
 		colors[i3 + 2] = color.b;
 
 		if (dust) {
-			sizes[i] = (16 + Math.random() * 24) * clump;
+			sizes[i] = (21 + Math.random() * 34) * clump;
 			blurs[i] = 1;
 		} else if (kind === "bulge") {
 			sizes[i] = 0.5 + Math.random() ** 3 * 2.4;
 			blurs[i] = Math.random() * 0.35;
 		} else {
 			// Mostly pinpoints, a scattered few blooming into soft bokeh discs.
+			// Kept small enough that the arms stay grainy instead of fusing into
+			// blown-out ribbons, which is what washes the colour out.
 			const roughness = Math.random() ** 4.2;
-			sizes[i] = (0.5 + roughness * 5.6) * sizeBias * (0.55 + clump * 0.8);
+			sizes[i] = (0.45 + roughness * 4.2) * sizeBias * (0.55 + clump * 0.8);
 			blurs[i] = Math.min(1, roughness * 1.4 + Math.random() * 0.2);
 		}
 
 		ts[i] = t;
 		twinkles[i] = Math.random() * Math.PI * 2;
+		// The core is treated as the end of the path, so the head lands on it.
+		orbits[i] = kind === "bulge" ? Math.random() * 0.02 : t;
+		seeds[i] = Math.random();
+		travels[i] = Math.random();
+		scatters[i3] = Math.random() - 0.5;
+		scatters[i3 + 1] = Math.random() - 0.5;
+		scatters[i3 + 2] = Math.random() - 0.5;
+
+		// Forward direction along the arm, used for the inward drift.
+		const ahead = spiralPoint(arm, Math.min(1, t + 0.004));
+		const dx = Math.cos(ahead.angle) * ahead.radius - Math.cos(angle) * radius;
+		const dy = Math.sin(ahead.angle) * ahead.radius - Math.sin(angle) * radius;
+		const magnitude = Math.hypot(dx, dy) || 1;
+		tangents[i3] = dx / magnitude;
+		tangents[i3 + 1] = dy / magnitude;
+		tangents[i3 + 2] = 0;
 	}
 
 	const geometry = new THREE.BufferGeometry();
@@ -205,10 +330,25 @@ function buildSpiralGeometry(count: number, kind: FieldKind) {
 	geometry.setAttribute("aBlur", new THREE.BufferAttribute(blurs, 1));
 	geometry.setAttribute("aT", new THREE.BufferAttribute(ts, 1));
 	geometry.setAttribute("aTwinkle", new THREE.BufferAttribute(twinkles, 1));
+	geometry.setAttribute("aOrbit", new THREE.BufferAttribute(orbits, 1));
+	geometry.setAttribute("aSeed", new THREE.BufferAttribute(seeds, 1));
+	geometry.setAttribute("aTravel", new THREE.BufferAttribute(travels, 1));
+	geometry.setAttribute("aScatter", new THREE.BufferAttribute(scatters, 3));
+	geometry.setAttribute("aTangent", new THREE.BufferAttribute(tangents, 3));
 	return geometry;
 }
 
-function createBokehMaterial(opacity: number, sizeScale: number) {
+type BokehOptions = {
+	/** Brightness the field keeps when the travelling light is far away. */
+	ambient: number;
+	/** Extra brightness picked up as the light passes. */
+	starBrightness: number;
+	driftDistance: number;
+	driftSpeed: number;
+	soft?: number;
+};
+
+function createBokehMaterial(opacity: number, options: BokehOptions) {
 	return new THREE.ShaderMaterial({
 		transparent: true,
 		depthTest: false,
@@ -220,7 +360,18 @@ function createBokehMaterial(opacity: number, sizeScale: number) {
 			uPixelRatio: { value: 1 },
 			uFormation: { value: 0 },
 			uOpacity: { value: opacity },
-			uSizeScale: { value: sizeScale },
+			uSizeScale: { value: 1 },
+			uSoft: { value: options.soft ?? 0 },
+			uAmbient: { value: options.ambient },
+			uStarBrightness: { value: options.starBrightness },
+			uHead: { value: 1 },
+			uKnots: { value: STAR_KNOTS },
+			uLightReach: { value: LIGHT_REACH },
+			uTrailLength: { value: TRAIL_LENGTH },
+			uDriftSpeed: { value: options.driftSpeed },
+			uDriftDistance: { value: options.driftDistance },
+			uScatterSize: { value: new THREE.Vector2(80, 80) },
+			uTilt: { value: INTRO_TILT },
 		},
 		vertexShader: BOKEH_VERTEX,
 		fragmentShader: BOKEH_FRAGMENT,
@@ -353,32 +504,48 @@ export function SpaceBackground({ onReplayReady }: SpaceBackgroundProps) {
 		scene.add(stars);
 
 		const spiralGroup = new THREE.Group();
-		spiralGroup.rotation.x = 0.14;
+		spiralGroup.rotation.set(0.08, -0.06, -0.025);
 		scene.add(spiralGroup);
 
 		const dustGeometry = buildSpiralGeometry(DUST_COUNT, "dust");
-		const dustMaterial = createBokehMaterial(0.12, 1);
+		const dustMaterial = createBokehMaterial(0.07, {
+			ambient: 0.6,
+			starBrightness: 0.6,
+			driftDistance: 2.4,
+			driftSpeed: 0.05,
+			soft: 1,
+		});
 		const dust = new THREE.Points(dustGeometry, dustMaterial);
 		dust.frustumCulled = false;
 		spiralGroup.add(dust);
 
 		const bulgeGeometry = buildSpiralGeometry(BULGE_COUNT, "bulge");
-		const bulgeMaterial = createBokehMaterial(0.9, 1);
+		const bulgeMaterial = createBokehMaterial(0.7, {
+			ambient: 1,
+			starBrightness: 0,
+			driftDistance: 0,
+			driftSpeed: 0,
+		});
 		const bulge = new THREE.Points(bulgeGeometry, bulgeMaterial);
 		bulge.frustumCulled = false;
 		spiralGroup.add(bulge);
 
 		const grainGeometry = buildSpiralGeometry(PARTICLE_COUNT, "grain");
-		const grainMaterial = createBokehMaterial(1, 1);
+		const grainMaterial = createBokehMaterial(1, {
+			ambient: 0.72,
+			starBrightness: 0.8,
+			driftDistance: 1.1,
+			driftSpeed: 0.05,
+		});
 		const grains = new THREE.Points(grainGeometry, grainMaterial);
 		grains.frustumCulled = false;
 		spiralGroup.add(grains);
 
 		const halo = radialSprite(
 			[
-				[0, "rgba(190,212,255,0.08)"],
-				[0.4, "rgba(140,170,225,0.028)"],
-				[1, "rgba(120,150,210,0)"],
+				[0, "rgba(255,236,214,0.085)"],
+				[0.4, "rgba(214,206,206,0.03)"],
+				[1, "rgba(200,200,210,0)"],
 			],
 			130,
 		);
@@ -399,42 +566,59 @@ export function SpaceBackground({ onReplayReady }: SpaceBackgroundProps) {
 		const starsMaterial = stars.material as THREE.ShaderMaterial;
 
 		let formationStart = performance.now();
-		let baseRotation = 0;
-		let dragRotation = 0;
-		let spinVelocity = 0;
+		let head = 1;
+		let spin = 0;
+		let targetRotationX = 0;
+		let targetRotationY = 0;
+		let currentRotationX = 0;
+		let currentRotationY = 0;
 		let isPointerDown = false;
 		let lastPointerX = 0;
+		let lastPointerY = 0;
+		const reducedMotion = window.matchMedia(
+			"(prefers-reduced-motion: reduce)",
+		).matches;
 
 		replayRef.current = () => {
 			formationStart = performance.now();
+			head = 1;
+			targetRotationX = 0;
+			targetRotationY = 0;
 		};
 
 		const onPointerDown = (event: PointerEvent) => {
+			if (!event.isPrimary || event.button !== 0) return;
 			isPointerDown = true;
 			lastPointerX = event.clientX;
-			spinVelocity = 0;
+			lastPointerY = event.clientY;
 			setIsDragging(true);
 			renderer.domElement.setPointerCapture(event.pointerId);
 		};
 
 		const onPointerMove = (event: PointerEvent) => {
-			if (!isPointerDown) return;
-			const delta = (event.clientX - lastPointerX) * 0.005;
-			dragRotation += delta;
-			spinVelocity = delta;
+			if (!isPointerDown || !event.isPrimary) return;
+			targetRotationY += (event.clientX - lastPointerX) * 0.005;
+			targetRotationX += (event.clientY - lastPointerY) * 0.005;
 			lastPointerX = event.clientX;
+			lastPointerY = event.clientY;
 		};
 
 		const onPointerUp = (event: PointerEvent) => {
 			if (!isPointerDown) return;
 			isPointerDown = false;
 			setIsDragging(false);
-			renderer.domElement.releasePointerCapture(event.pointerId);
+			if (renderer.domElement.hasPointerCapture(event.pointerId)) {
+				renderer.domElement.releasePointerCapture(event.pointerId);
+			}
 		};
 
 		const onKeyDown = (event: KeyboardEvent) => {
-			if (event.key === "ArrowLeft") spinVelocity += 0.012;
-			if (event.key === "ArrowRight") spinVelocity -= 0.012;
+			if (!event.key.startsWith("Arrow")) return;
+			event.preventDefault();
+			if (event.key === "ArrowLeft") targetRotationY -= 0.08;
+			if (event.key === "ArrowRight") targetRotationY += 0.08;
+			if (event.key === "ArrowUp") targetRotationX -= 0.08;
+			if (event.key === "ArrowDown") targetRotationX += 0.08;
 		};
 
 		renderer.domElement.addEventListener("pointerdown", onPointerDown);
@@ -455,6 +639,17 @@ export function SpaceBackground({ onReplayReady }: SpaceBackgroundProps) {
 			camera.aspect = width / height;
 			camera.updateProjectionMatrix();
 
+			// Particles start scattered across the whole frame, so the box the
+			// intro draws them from has to track the visible area.
+			const visibleHeight =
+				2 * Math.tan((camera.fov * Math.PI) / 360) * camera.position.z;
+			for (const material of [grainMaterial, dustMaterial, bulgeMaterial]) {
+				material.uniforms.uScatterSize.value.set(
+					visibleHeight * camera.aspect,
+					visibleHeight,
+				);
+			}
+
 			// Keep the spiral framed the same way on narrow viewports.
 			const fit = Math.min(1, Math.max(0.62, width / 1100));
 			spiralGroup.scale.setScalar(fit);
@@ -469,25 +664,45 @@ export function SpaceBackground({ onReplayReady }: SpaceBackgroundProps) {
 
 		const animate = () => {
 			rafId = window.requestAnimationFrame(animate);
-			const t = clock.getElapsedTime();
-			const formation = Math.min(
-				1,
-				(performance.now() - formationStart) / 1000 / INTRO_DURATION,
-			);
+			const delta = Math.min(clock.getDelta(), 0.05);
+			const t = clock.elapsedTime;
+			const introElapsed = (performance.now() - formationStart) / 1000;
+			const formation = reducedMotion
+				? 1
+				: Math.min(
+						1,
+						Math.max(0, introElapsed - INTRO_DELAY) / INTRO_DURATION,
+					);
+
+			// The light runs from the rim toward the core, wrapping around.
+			head = (head - delta * FLOW_SPEED + 1) % 1;
 
 			for (const material of [grainMaterial, dustMaterial, bulgeMaterial]) {
 				material.uniforms.uTime.value = t;
 				material.uniforms.uFormation.value = formation;
+				material.uniforms.uHead.value = head;
 			}
 
 			if (!isPointerDown) {
-				dragRotation += spinVelocity;
-				spinVelocity *= 0.94;
+				const returnAmount = 1 - Math.exp(-RETURN_SPRING * delta);
+				targetRotationX += (0 - targetRotationX) * returnAmount;
+				targetRotationY += (0 - targetRotationY) * returnAmount;
 			}
-			baseRotation += 0.0011;
-			spiralGroup.rotation.z = baseRotation + dragRotation;
+			const followAmount = 1 - Math.exp(-FOLLOW_DAMPING * delta);
+			currentRotationX +=
+				(targetRotationX - currentRotationX) * followAmount;
+			currentRotationY +=
+				(targetRotationY - currentRotationY) * followAmount;
+			// The field never comes to rest: it keeps turning about its axis with a
+			// slow wobble, so the arms drift past the frame after they have formed.
+			if (!reducedMotion) spin = (spin + delta * SPIN_SPEED) % (Math.PI * 2);
+			const wobbleX = reducedMotion ? 0 : 0.08 * Math.sin(t * 0.22);
+			const wobbleY = reducedMotion ? 0 : 0.14 * Math.cos(t * 0.28);
+			spiralGroup.rotation.x = 0.08 + wobbleX + currentRotationX;
+			spiralGroup.rotation.y = -0.06 + wobbleY + currentRotationY;
+			spiralGroup.rotation.z = -0.025 + spin;
 
-			(core.material as THREE.SpriteMaterial).opacity = formation ** 2;
+			(core.material as THREE.SpriteMaterial).opacity = formation ** 2 * 0.8;
 			(halo.material as THREE.SpriteMaterial).opacity = formation;
 
 			renderer.render(scene, camera);
@@ -560,3 +775,4 @@ export function ReplayButton({ onClick }: { onClick: () => void }) {
 		</button>
 	);
 }
+
