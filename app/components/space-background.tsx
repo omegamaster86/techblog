@@ -3,31 +3,57 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import * as THREE from "three";
 
-const PARTICLE_COUNT = 12000;
-const BULGE_COUNT = 2200;
-const DUST_COUNT = 4000;
-const STAR_COUNT = 900;
+const PARTICLE_BUDGET = {
+	high: { grain: 12000, bulge: 2200, dust: 4000, stars: 900 },
+	medium: { grain: 8000, bulge: 1500, dust: 2600, stars: 600 },
+	low: { grain: 5000, bulge: 900, dust: 1600, stars: 380 },
+} as const;
+
 const ARM_COUNT = 2;
 const TURNS = 2.35;
 const INNER_RADIUS = 5.5;
 const OUTER_RADIUS = 52;
-const INTRO_DELAY = 2.2;
-const INTRO_DURATION = 5.5;
+/** Astra shows the field almost immediately; a short beat before convergence. */
+const INTRO_DELAY = 0.35;
+const INTRO_DURATION = 4.2;
 const FOLLOW_DAMPING = 6;
 const RETURN_SPRING = 2.8;
 /** Laps per second for the light that runs inward along the arms. */
-const FLOW_SPEED = 0.12;
+const FLOW_SPEED = 0.09;
 /** How far ahead of the travelling head a particle still catches light. */
-const LIGHT_REACH = 0.2;
+const LIGHT_REACH = 0.17;
 /** Fraction of the path that keeps a fading glow behind a head. */
-const TRAIL_LENGTH = 0.08;
+const TRAIL_LENGTH = 0.06;
 /** Offsets of the bright knots that travel along the arms together. */
 const STAR_KNOTS = [0.15, 0.28, 0.38, 0.52, 0.62, 0.84, 0.94];
 const TWINKLE_SPEED = 0.62;
 /** Spiral tilt the field flattens out of while it converges. */
 const INTRO_TILT = 0.5;
 /** Radians per second the settled field keeps turning about its own axis. */
-const SPIN_SPEED = 0.288;
+const SPIN_SPEED = 0.2;
+
+type QualityTier = keyof typeof PARTICLE_BUDGET;
+
+function getQualityTier(): QualityTier {
+	const coarse = window.matchMedia("(pointer: coarse)").matches;
+	const narrow = window.innerWidth < 768;
+	const lowMemory =
+		"deviceMemory" in navigator &&
+		(navigator as Navigator & { deviceMemory?: number }).deviceMemory !==
+			undefined &&
+		((navigator as Navigator & { deviceMemory?: number }).deviceMemory ?? 8) <
+			4;
+
+	if (narrow || lowMemory) return "low";
+	if (coarse || window.innerWidth < 1100) return "medium";
+	return "high";
+}
+
+function getPixelRatioCap(tier: QualityTier): number {
+	if (tier === "low") return 1.25;
+	if (tier === "medium") return 1.5;
+	return 2;
+}
 
 /**
  * Near-Archimedean spiral with a slight outward bias, so inner turns stay tight
@@ -265,19 +291,18 @@ function buildSpiralGeometry(count: number, kind: FieldKind) {
 		let color: THREE.Color;
 		let sizeBias = 1;
 		const roll = Math.random();
-		// Weighted like the reference field: mostly near-white, with a warm and a
-		// cool minority in roughly equal measure.
+		// Reference palette: ~70% white, ~20% cool, ~10% warm.
 		if (kind === "bulge") {
-			color = roll < 0.2 ? amber : white;
-		} else if (roll < 0.09) {
+			color = roll < 0.14 ? amber : white;
+		} else if (roll < 0.07) {
 			color = ember;
 			sizeBias = 0.95;
-		} else if (roll < 0.18) {
+		} else if (roll < 0.1) {
 			color = amber;
-		} else if (roll < 0.31) {
+		} else if (roll < 0.2) {
 			color = cyan;
 			sizeBias = 0.86;
-		} else if (roll < 0.46) {
+		} else if (roll < 0.3) {
 			color = blue;
 			sizeBias = 0.9;
 		} else {
@@ -298,9 +323,9 @@ function buildSpiralGeometry(count: number, kind: FieldKind) {
 			// Mostly pinpoints, a scattered few blooming into soft bokeh discs.
 			// Kept small enough that the arms stay grainy instead of fusing into
 			// blown-out ribbons, which is what washes the colour out.
-			const roughness = Math.random() ** 4.2;
-			sizes[i] = (0.45 + roughness * 4.2) * sizeBias * (0.55 + clump * 0.8);
-			blurs[i] = Math.min(1, roughness * 1.4 + Math.random() * 0.2);
+			const roughness = Math.random() ** 3.6;
+			sizes[i] = (0.5 + roughness * 4.8) * sizeBias * (0.55 + clump * 0.8);
+			blurs[i] = Math.min(1, roughness * 1.65 + Math.random() * 0.28);
 		}
 
 		ts[i] = t;
@@ -378,12 +403,12 @@ function createBokehMaterial(opacity: number, options: BokehOptions) {
 	});
 }
 
-function createStarField(): THREE.Points {
-	const positions = new Float32Array(STAR_COUNT * 3);
-	const colors = new Float32Array(STAR_COUNT * 3);
-	const sizes = new Float32Array(STAR_COUNT);
+function createStarField(starCount: number): THREE.Points {
+	const positions = new Float32Array(starCount * 3);
+	const colors = new Float32Array(starCount * 3);
+	const sizes = new Float32Array(starCount);
 
-	for (let i = 0; i < STAR_COUNT; i++) {
+	for (let i = 0; i < starCount; i++) {
 		const i3 = i * 3;
 		positions[i3] = (Math.random() - 0.5) * 340;
 		positions[i3 + 1] = (Math.random() - 0.5) * 340;
@@ -463,9 +488,14 @@ function radialSprite(stops: [number, string][], scale: number): THREE.Sprite {
 
 type SpaceBackgroundProps = {
 	onReplayReady?: (replay: () => void) => void;
+	/** 0 = fully faded, 1 = fully visible. Driven by hero scroll position. */
+	scrollFade?: number;
 };
 
-export function SpaceBackground({ onReplayReady }: SpaceBackgroundProps) {
+export function SpaceBackground({
+	onReplayReady,
+	scrollFade = 1,
+}: SpaceBackgroundProps) {
 	const containerRef = useRef<HTMLDivElement | null>(null);
 	const replayRef = useRef<(() => void) | null>(null);
 	const [isDragging, setIsDragging] = useState(false);
@@ -482,13 +512,20 @@ export function SpaceBackground({ onReplayReady }: SpaceBackgroundProps) {
 		const container = containerRef.current;
 		if (!container) return;
 
+		const qualityTier = getQualityTier();
+		const counts = PARTICLE_BUDGET[qualityTier];
+		const coarsePointer = window.matchMedia("(pointer: coarse)").matches;
+		const rotationGain = coarsePointer ? 0.0075 : 0.005;
+
 		const renderer = new THREE.WebGLRenderer({
-			antialias: true,
+			antialias: qualityTier !== "low",
 			alpha: false,
 			powerPreference: "high-performance",
 		});
 		renderer.setClearColor(0x01030a, 1);
-		renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+		renderer.setPixelRatio(
+			Math.min(window.devicePixelRatio, getPixelRatioCap(qualityTier)),
+		);
 		renderer.outputColorSpace = THREE.SRGBColorSpace;
 		renderer.domElement.style.width = "100%";
 		renderer.domElement.style.height = "100%";
@@ -500,26 +537,26 @@ export function SpaceBackground({ onReplayReady }: SpaceBackgroundProps) {
 		const camera = new THREE.PerspectiveCamera(52, 1, 0.1, 600);
 		camera.position.set(0, 0, 78);
 
-		const stars = createStarField();
+		const stars = createStarField(counts.stars);
 		scene.add(stars);
 
 		const spiralGroup = new THREE.Group();
 		spiralGroup.rotation.set(0.08, -0.06, -0.025);
 		scene.add(spiralGroup);
 
-		const dustGeometry = buildSpiralGeometry(DUST_COUNT, "dust");
-		const dustMaterial = createBokehMaterial(0.07, {
-			ambient: 0.6,
-			starBrightness: 0.6,
+		const dustGeometry = buildSpiralGeometry(counts.dust, "dust");
+		const dustMaterial = createBokehMaterial(0.08, {
+			ambient: 0.62,
+			starBrightness: 0.45,
 			driftDistance: 2.4,
-			driftSpeed: 0.05,
+			driftSpeed: 0.04,
 			soft: 1,
 		});
 		const dust = new THREE.Points(dustGeometry, dustMaterial);
 		dust.frustumCulled = false;
 		spiralGroup.add(dust);
 
-		const bulgeGeometry = buildSpiralGeometry(BULGE_COUNT, "bulge");
+		const bulgeGeometry = buildSpiralGeometry(counts.bulge, "bulge");
 		const bulgeMaterial = createBokehMaterial(0.7, {
 			ambient: 1,
 			starBrightness: 0,
@@ -530,12 +567,12 @@ export function SpaceBackground({ onReplayReady }: SpaceBackgroundProps) {
 		bulge.frustumCulled = false;
 		spiralGroup.add(bulge);
 
-		const grainGeometry = buildSpiralGeometry(PARTICLE_COUNT, "grain");
+		const grainGeometry = buildSpiralGeometry(counts.grain, "grain");
 		const grainMaterial = createBokehMaterial(1, {
-			ambient: 0.72,
-			starBrightness: 0.8,
+			ambient: 0.7,
+			starBrightness: 0.62,
 			driftDistance: 1.1,
-			driftSpeed: 0.05,
+			driftSpeed: 0.04,
 		});
 		const grains = new THREE.Points(grainGeometry, grainMaterial);
 		grains.frustumCulled = false;
@@ -575,6 +612,8 @@ export function SpaceBackground({ onReplayReady }: SpaceBackgroundProps) {
 		let isPointerDown = false;
 		let lastPointerX = 0;
 		let lastPointerY = 0;
+		let pointerMoved = false;
+		let isVisible = !document.hidden;
 		const reducedMotion = window.matchMedia(
 			"(prefers-reduced-motion: reduce)",
 		).matches;
@@ -589,6 +628,7 @@ export function SpaceBackground({ onReplayReady }: SpaceBackgroundProps) {
 		const onPointerDown = (event: PointerEvent) => {
 			if (!event.isPrimary || event.button !== 0) return;
 			isPointerDown = true;
+			pointerMoved = false;
 			lastPointerX = event.clientX;
 			lastPointerY = event.clientY;
 			setIsDragging(true);
@@ -597,8 +637,12 @@ export function SpaceBackground({ onReplayReady }: SpaceBackgroundProps) {
 
 		const onPointerMove = (event: PointerEvent) => {
 			if (!isPointerDown || !event.isPrimary) return;
-			targetRotationY += (event.clientX - lastPointerX) * 0.005;
-			targetRotationX += (event.clientY - lastPointerY) * 0.005;
+			const dx = event.clientX - lastPointerX;
+			const dy = event.clientY - lastPointerY;
+			if (!pointerMoved && Math.hypot(dx, dy) < 6) return;
+			pointerMoved = true;
+			targetRotationY += dx * rotationGain;
+			targetRotationX += dy * rotationGain;
 			lastPointerX = event.clientX;
 			lastPointerY = event.clientY;
 		};
@@ -606,10 +650,16 @@ export function SpaceBackground({ onReplayReady }: SpaceBackgroundProps) {
 		const onPointerUp = (event: PointerEvent) => {
 			if (!isPointerDown) return;
 			isPointerDown = false;
+			pointerMoved = false;
 			setIsDragging(false);
 			if (renderer.domElement.hasPointerCapture(event.pointerId)) {
 				renderer.domElement.releasePointerCapture(event.pointerId);
 			}
+		};
+
+		const onVisibilityChange = () => {
+			isVisible = !document.hidden;
+			if (isVisible) clock.getDelta();
 		};
 
 		const onKeyDown = (event: KeyboardEvent) => {
@@ -626,6 +676,7 @@ export function SpaceBackground({ onReplayReady }: SpaceBackgroundProps) {
 		renderer.domElement.addEventListener("pointerup", onPointerUp);
 		renderer.domElement.addEventListener("pointercancel", onPointerUp);
 		window.addEventListener("keydown", onKeyDown);
+		document.addEventListener("visibilitychange", onVisibilityChange);
 
 		const resize = () => {
 			const width = Math.max(1, container.clientWidth);
@@ -650,8 +701,10 @@ export function SpaceBackground({ onReplayReady }: SpaceBackgroundProps) {
 				);
 			}
 
-			// Keep the spiral framed the same way on narrow viewports.
-			const fit = Math.min(1, Math.max(0.62, width / 1100));
+			// Keep the spiral centered and proportionally framed on all viewports.
+			const widthFit = width / 1100;
+			const heightFit = height / 700;
+			const fit = Math.min(1, Math.max(0.68, Math.min(widthFit, heightFit)));
 			spiralGroup.scale.setScalar(fit);
 		};
 
@@ -664,6 +717,7 @@ export function SpaceBackground({ onReplayReady }: SpaceBackgroundProps) {
 
 		const animate = () => {
 			rafId = window.requestAnimationFrame(animate);
+			if (!isVisible) return;
 			const delta = Math.min(clock.getDelta(), 0.05);
 			const t = clock.elapsedTime;
 			const introElapsed = (performance.now() - formationStart) / 1000;
@@ -718,6 +772,7 @@ export function SpaceBackground({ onReplayReady }: SpaceBackgroundProps) {
 			renderer.domElement.removeEventListener("pointerup", onPointerUp);
 			renderer.domElement.removeEventListener("pointercancel", onPointerUp);
 			window.removeEventListener("keydown", onKeyDown);
+			document.removeEventListener("visibilitychange", onVisibilityChange);
 
 			for (const sprite of [halo, core]) {
 				const material = sprite.material as THREE.SpriteMaterial;
@@ -743,7 +798,8 @@ export function SpaceBackground({ onReplayReady }: SpaceBackgroundProps) {
 	return (
 		<div
 			ref={containerRef}
-			className={`absolute inset-0 z-0 ${isDragging ? "cursor-grabbing" : "cursor-grab"}`}
+			className={`absolute inset-0 z-0 transition-opacity duration-500 ease-out ${isDragging ? "cursor-grabbing" : "cursor-grab"}`}
+			style={{ opacity: scrollFade }}
 			aria-label="Drag or use arrow keys to rotate the star field"
 			role="img"
 		/>
