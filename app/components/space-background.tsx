@@ -130,7 +130,7 @@ const BOKEH_VERTEX = `
 		float lit = uAmbient + coreGlow * uCoreBoost;
 		vColor = color * lit;
 		vBright = lit * (1.0 - vBlur * 0.7) + aSize * 0.04 + coreGlow * 0.35;
-		vAlpha = uOpacity * twinkle * reveal * (0.55 + coreGlow * 0.45);
+		vAlpha = uOpacity * twinkle * reveal * (0.72 + coreGlow * 0.28);
 	}
 `;
 
@@ -154,10 +154,10 @@ const BOKEH_FRAGMENT = `
 		float spikes = pow(abs(cos(angle * 2.0)), 7.0) * pow(1.0 - d, 1.1);
 		float starburst = spikes * smoothstep(0.48, 0.9, vBright) * (1.0 - vBlur * 0.8);
 
-		float alpha = bokeh * vAlpha + starburst * vAlpha * 0.38;
+		float alpha = bokeh * vAlpha + starburst * vAlpha * 0.48;
 		if (alpha < 0.003) discard;
 
-		vec3 col = vColor + vec3(starburst * 0.55);
+		vec3 col = vColor + vec3(starburst * 0.72);
 		gl_FragColor = vec4(col, alpha);
 	}
 `;
@@ -189,12 +189,12 @@ function buildSpiralGeometry(count: number, kind: FieldKind) {
 	const travels = new Float32Array(count);
 	const scatters = new Float32Array(count * 3);
 
-	const white = new THREE.Color("#eef1f4");
-	const cool = new THREE.Color("#c5d6e6");
-	const cyan = new THREE.Color("#7ec4e8");
-	const blue = new THREE.Color("#8ab4f0");
-	const ember = new THREE.Color("#e08048");
-	const amber = new THREE.Color("#e8a060");
+	const white = new THREE.Color("#f5f7fa");
+	const cool = new THREE.Color("#d0e0f0");
+	const cyan = new THREE.Color("#88d4f4");
+	const blue = new THREE.Color("#98c4ff");
+	const ember = new THREE.Color("#f08850");
+	const amber = new THREE.Color("#f0a868");
 
 	for (let i = 0; i < count; i++) {
 		const i3 = i * 3;
@@ -425,7 +425,7 @@ export function SpaceBackground({ onReplayReady }: SpaceBackgroundProps) {
 		renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
 		renderer.outputColorSpace = THREE.SRGBColorSpace;
 		renderer.toneMapping = THREE.ACESFilmicToneMapping;
-		renderer.toneMappingExposure = 1.05;
+		renderer.toneMappingExposure = 1.38;
 		renderer.domElement.style.width = "100%";
 		renderer.domElement.style.height = "100%";
 		renderer.domElement.style.display = "block";
@@ -439,9 +439,9 @@ export function SpaceBackground({ onReplayReady }: SpaceBackgroundProps) {
 		composer.addPass(new RenderPass(scene, camera));
 		const bloomPass = new UnrealBloomPass(
 			new THREE.Vector2(1, 1),
-			0.52,
-			0.55,
-			0.38,
+			0.92,
+			0.62,
+			0.22,
 		);
 		composer.addPass(bloomPass);
 
@@ -453,9 +453,9 @@ export function SpaceBackground({ onReplayReady }: SpaceBackgroundProps) {
 		scene.add(spiralGroup);
 
 		const dustGeometry = buildSpiralGeometry(DUST_COUNT, "dust");
-		const dustMaterial = createBokehMaterial(0.065, {
-			ambient: 0.42,
-			coreBoost: 0.55,
+		const dustMaterial = createBokehMaterial(0.095, {
+			ambient: 0.58,
+			coreBoost: 0.82,
 			soft: true,
 		});
 		const dust = new THREE.Points(dustGeometry, dustMaterial);
@@ -463,18 +463,18 @@ export function SpaceBackground({ onReplayReady }: SpaceBackgroundProps) {
 		spiralGroup.add(dust);
 
 		const bulgeGeometry = buildSpiralGeometry(BULGE_COUNT, "bulge");
-		const bulgeMaterial = createBokehMaterial(0.82, {
-			ambient: 0.85,
-			coreBoost: 1.4,
+		const bulgeMaterial = createBokehMaterial(1.0, {
+			ambient: 1.05,
+			coreBoost: 1.85,
 		});
 		const bulge = new THREE.Points(bulgeGeometry, bulgeMaterial);
 		bulge.frustumCulled = false;
 		spiralGroup.add(bulge);
 
 		const grainGeometry = buildSpiralGeometry(PARTICLE_COUNT, "grain");
-		const grainMaterial = createBokehMaterial(0.78, {
-			ambient: 0.62,
-			coreBoost: 0.95,
+		const grainMaterial = createBokehMaterial(0.95, {
+			ambient: 0.78,
+			coreBoost: 1.35,
 		});
 		const grains = new THREE.Points(grainGeometry, grainMaterial);
 		grains.frustumCulled = false;
@@ -492,13 +492,13 @@ export function SpaceBackground({ onReplayReady }: SpaceBackgroundProps) {
 
 		const core = radialSprite(
 			[
-				[0, "rgba(255,255,252,1)"],
-				[0.1, "rgba(255,252,245,0.85)"],
-				[0.22, "rgba(245,248,255,0.45)"],
-				[0.45, "rgba(225,235,255,0.12)"],
+				[0, "rgba(255,255,255,1)"],
+				[0.08, "rgba(255,254,248,0.95)"],
+				[0.18, "rgba(250,252,255,0.62)"],
+				[0.38, "rgba(235,242,255,0.2)"],
 				[1, "rgba(200,220,255,0)"],
 			],
-			50,
+			54,
 		);
 		spiralGroup.add(core);
 
@@ -570,8 +570,8 @@ export function SpaceBackground({ onReplayReady }: SpaceBackgroundProps) {
 			if (!reducedMotion) spin = (spin + delta * SPIN_SPEED) % (Math.PI * 2);
 			spiralGroup.rotation.z = VIEW_TILT_Z + spin;
 
-			(core.material as THREE.SpriteMaterial).opacity = formation ** 2 * 0.92;
-			(halo.material as THREE.SpriteMaterial).opacity = formation * 0.88;
+			(core.material as THREE.SpriteMaterial).opacity = formation ** 2 * 1.0;
+			(halo.material as THREE.SpriteMaterial).opacity = formation;
 
 			composer.render();
 		};
