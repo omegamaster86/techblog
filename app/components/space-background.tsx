@@ -3,31 +3,31 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import * as THREE from "three";
 
-const PARTICLE_COUNT = 12000;
-const BULGE_COUNT = 2200;
-const DUST_COUNT = 4000;
+const PARTICLE_COUNT = 14000;
+const BULGE_COUNT = 2800;
+const DUST_COUNT = 4500;
 const STAR_COUNT = 900;
-const ARM_COUNT = 2;
-const TURNS = 2.35;
-const INNER_RADIUS = 5.5;
-const OUTER_RADIUS = 52;
-const INTRO_DELAY = 2.2;
-const INTRO_DURATION = 5.5;
+const ARM_COUNT = 3;
+const TURNS = 2.65;
+const INNER_RADIUS = 4.5;
+const OUTER_RADIUS = 54;
+const INTRO_DELAY = 0.35;
+const INTRO_DURATION = 2.6;
 const FOLLOW_DAMPING = 6;
 const RETURN_SPRING = 2.8;
 /** Laps per second for the light that runs inward along the arms. */
-const FLOW_SPEED = 0.12;
+const FLOW_SPEED = 0.05;
 /** How far ahead of the travelling head a particle still catches light. */
-const LIGHT_REACH = 0.2;
+const LIGHT_REACH = 0.16;
 /** Fraction of the path that keeps a fading glow behind a head. */
-const TRAIL_LENGTH = 0.08;
+const TRAIL_LENGTH = 0.06;
 /** Offsets of the bright knots that travel along the arms together. */
-const STAR_KNOTS = [0.15, 0.28, 0.38, 0.52, 0.62, 0.84, 0.94];
-const TWINKLE_SPEED = 0.62;
+const STAR_KNOTS = [0.18, 0.34, 0.48, 0.62, 0.78, 0.91];
+const TWINKLE_SPEED = 0.48;
 /** Spiral tilt the field flattens out of while it converges. */
-const INTRO_TILT = 0.5;
+const INTRO_TILT = 0.42;
 /** Radians per second the settled field keeps turning about its own axis. */
-const SPIN_SPEED = 0.288;
+const SPIN_SPEED = 0.042;
 
 /**
  * Near-Archimedean spiral with a slight outward bias, so inner turns stay tight
@@ -35,7 +35,7 @@ const SPIN_SPEED = 0.288;
  */
 function spiralPoint(arm: number, t: number) {
 	const theta = t * TURNS * Math.PI * 2;
-	const radius = INNER_RADIUS + (OUTER_RADIUS - INNER_RADIUS) * t ** 1.22;
+	const radius = INNER_RADIUS * (OUTER_RADIUS / INNER_RADIUS) ** t;
 	const angle = theta + (arm / ARM_COUNT) * Math.PI * 2;
 	return { radius, angle };
 }
@@ -73,6 +73,7 @@ const BOKEH_VERTEX = `
 	varying vec3 vColor;
 	varying float vAlpha;
 	varying float vBlur;
+	varying float vBright;
 	uniform float uPixelRatio;
 	uniform float uTime;
 	uniform float uFormation;
@@ -170,10 +171,12 @@ const BOKEH_VERTEX = `
 		);
 		gl_Position = projectionMatrix * mvPosition;
 
-		float twinkle = 0.82 + 0.18 * sin(uTime * ${TWINKLE_SPEED} + aTwinkle);
-		vColor = color * (uAmbient + illumination * uStarBrightness);
+		float twinkle = 0.84 + 0.16 * sin(uTime * ${TWINKLE_SPEED} + aTwinkle);
+		float lit = uAmbient + illumination * uStarBrightness;
+		vColor = color * lit;
+		vBright = lit * (1.0 - vBlur * 0.75) + aSize * 0.035;
 		vAlpha = uOpacity
-			* (0.22 + illumination * 0.78)
+			* (0.28 + illumination * 0.62)
 			* mix(1.0, driftFade, step(0.0001, uDriftSpeed))
 			* twinkle
 			* reveal;
@@ -190,6 +193,7 @@ const BOKEH_FRAGMENT = `
 	varying vec3 vColor;
 	varying float vAlpha;
 	varying float vBlur;
+	varying float vBright;
 	uniform float uSoft;
 
 	void main() {
@@ -203,10 +207,15 @@ const BOKEH_FRAGMENT = `
 		float bokeh = disc * mix(0.35, 0.9, vBlur) + core + rim;
 		float haze = exp(-d * d * 3.2) * (1.0 - smoothstep(0.7, 1.0, d));
 
-		float alpha = mix(bokeh, haze, uSoft) * vAlpha;
+		float angle = atan(uv.y, uv.x);
+		float spikes = pow(abs(cos(angle * 2.0)), 11.0) * pow(1.0 - d, 1.4);
+		float starburst = spikes * smoothstep(0.42, 0.92, vBright) * (1.0 - vBlur * 0.9);
+
+		float alpha = mix(bokeh, haze, uSoft) * vAlpha + starburst * vAlpha * 0.42;
 		if (alpha < 0.004) discard;
 
-		gl_FragColor = vec4(vColor, alpha);
+		vec3 color = vColor + vec3(starburst * 0.35);
+		gl_FragColor = vec4(color, alpha);
 	}
 `;
 
@@ -269,17 +278,18 @@ function buildSpiralGeometry(count: number, kind: FieldKind) {
 		// cool minority in roughly equal measure.
 		if (kind === "bulge") {
 			color = roll < 0.2 ? amber : white;
-		} else if (roll < 0.09) {
+		} else if (roll < 0.11) {
 			color = ember;
-			sizeBias = 0.95;
-		} else if (roll < 0.18) {
+			sizeBias = 1.05;
+		} else if (roll < 0.22) {
 			color = amber;
-		} else if (roll < 0.31) {
+			sizeBias = 1.02;
+		} else if (roll < 0.34) {
 			color = cyan;
-			sizeBias = 0.86;
-		} else if (roll < 0.46) {
-			color = blue;
 			sizeBias = 0.9;
+		} else if (roll < 0.48) {
+			color = blue;
+			sizeBias = 0.92;
 		} else {
 			color = white;
 		}
@@ -298,9 +308,9 @@ function buildSpiralGeometry(count: number, kind: FieldKind) {
 			// Mostly pinpoints, a scattered few blooming into soft bokeh discs.
 			// Kept small enough that the arms stay grainy instead of fusing into
 			// blown-out ribbons, which is what washes the colour out.
-			const roughness = Math.random() ** 4.2;
-			sizes[i] = (0.45 + roughness * 4.2) * sizeBias * (0.55 + clump * 0.8);
-			blurs[i] = Math.min(1, roughness * 1.4 + Math.random() * 0.2);
+			const roughness = Math.random() ** 3.8;
+			sizes[i] = (0.5 + roughness * 5.4) * sizeBias * (0.58 + clump * 0.82);
+			blurs[i] = Math.min(1, roughness * 1.35 + Math.random() * 0.18);
 		}
 
 		ts[i] = t;
@@ -487,7 +497,7 @@ export function SpaceBackground({ onReplayReady }: SpaceBackgroundProps) {
 			alpha: false,
 			powerPreference: "high-performance",
 		});
-		renderer.setClearColor(0x01030a, 1);
+		renderer.setClearColor(0x000000, 1);
 		renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
 		renderer.outputColorSpace = THREE.SRGBColorSpace;
 		renderer.domElement.style.width = "100%";
@@ -497,7 +507,7 @@ export function SpaceBackground({ onReplayReady }: SpaceBackgroundProps) {
 		container.appendChild(renderer.domElement);
 
 		const scene = new THREE.Scene();
-		const camera = new THREE.PerspectiveCamera(52, 1, 0.1, 600);
+		const camera = new THREE.PerspectiveCamera(48, 1, 0.1, 600);
 		camera.position.set(0, 0, 78);
 
 		const stars = createStarField();
@@ -508,11 +518,11 @@ export function SpaceBackground({ onReplayReady }: SpaceBackgroundProps) {
 		scene.add(spiralGroup);
 
 		const dustGeometry = buildSpiralGeometry(DUST_COUNT, "dust");
-		const dustMaterial = createBokehMaterial(0.07, {
-			ambient: 0.6,
-			starBrightness: 0.6,
-			driftDistance: 2.4,
-			driftSpeed: 0.05,
+		const dustMaterial = createBokehMaterial(0.08, {
+			ambient: 0.65,
+			starBrightness: 0.42,
+			driftDistance: 2.2,
+			driftSpeed: 0.04,
 			soft: 1,
 		});
 		const dust = new THREE.Points(dustGeometry, dustMaterial);
@@ -532,10 +542,10 @@ export function SpaceBackground({ onReplayReady }: SpaceBackgroundProps) {
 
 		const grainGeometry = buildSpiralGeometry(PARTICLE_COUNT, "grain");
 		const grainMaterial = createBokehMaterial(1, {
-			ambient: 0.72,
-			starBrightness: 0.8,
-			driftDistance: 1.1,
-			driftSpeed: 0.05,
+			ambient: 0.8,
+			starBrightness: 0.48,
+			driftDistance: 0.9,
+			driftSpeed: 0.035,
 		});
 		const grains = new THREE.Points(grainGeometry, grainMaterial);
 		grains.frustumCulled = false;
@@ -543,23 +553,23 @@ export function SpaceBackground({ onReplayReady }: SpaceBackgroundProps) {
 
 		const halo = radialSprite(
 			[
-				[0, "rgba(255,236,214,0.085)"],
-				[0.4, "rgba(214,206,206,0.03)"],
+				[0, "rgba(255,240,220,0.1)"],
+				[0.35, "rgba(220,210,205,0.035)"],
 				[1, "rgba(200,200,210,0)"],
 			],
-			130,
+			145,
 		);
 		spiralGroup.add(halo);
 
 		const core = radialSprite(
 			[
 				[0, "rgba(255,254,250,1)"],
-				[0.14, "rgba(255,250,238,0.72)"],
-				[0.32, "rgba(240,246,255,0.3)"],
-				[0.6, "rgba(215,230,255,0.08)"],
+				[0.12, "rgba(255,250,238,0.78)"],
+				[0.28, "rgba(245,248,255,0.38)"],
+				[0.55, "rgba(220,235,255,0.1)"],
 				[1, "rgba(200,220,255,0)"],
 			],
-			30,
+			38,
 		);
 		spiralGroup.add(core);
 
@@ -696,8 +706,8 @@ export function SpaceBackground({ onReplayReady }: SpaceBackgroundProps) {
 			// The field never comes to rest: it keeps turning about its axis with a
 			// slow wobble, so the arms drift past the frame after they have formed.
 			if (!reducedMotion) spin = (spin + delta * SPIN_SPEED) % (Math.PI * 2);
-			const wobbleX = reducedMotion ? 0 : 0.08 * Math.sin(t * 0.22);
-			const wobbleY = reducedMotion ? 0 : 0.14 * Math.cos(t * 0.28);
+			const wobbleX = reducedMotion ? 0 : 0.04 * Math.sin(t * 0.18);
+			const wobbleY = reducedMotion ? 0 : 0.06 * Math.cos(t * 0.22);
 			spiralGroup.rotation.x = 0.08 + wobbleX + currentRotationX;
 			spiralGroup.rotation.y = -0.06 + wobbleY + currentRotationY;
 			spiralGroup.rotation.z = -0.025 + spin;
