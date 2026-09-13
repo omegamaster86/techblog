@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef } from "react";
 import * as THREE from "three";
 
 const PARTICLE_COUNT = 16000;
@@ -11,23 +11,28 @@ const ARM_COUNT = 2;
 const TURNS = 2.75;
 const INNER_RADIUS = 4.5;
 const OUTER_RADIUS = 54;
-const INTRO_DELAY = 0.35;
-const INTRO_DURATION = 2.4;
-const FOLLOW_DAMPING = 6;
-const RETURN_SPRING = 2.8;
+const INTRO_DELAY = 0.45;
+const INTRO_DURATION = 2.8;
 /** Laps per second for the light that runs inward along the arms. */
-const FLOW_SPEED = 0.042;
+const FLOW_SPEED = 0.026;
 /** How far ahead of the travelling head a particle still catches light. */
-const LIGHT_REACH = 0.16;
+const LIGHT_REACH = 0.13;
 /** Fraction of the path that keeps a fading glow behind a head. */
-const TRAIL_LENGTH = 0.06;
+const TRAIL_LENGTH = 0.045;
 /** Offsets of the bright knots that travel along the arms together. */
-const STAR_KNOTS = [0.18, 0.34, 0.48, 0.62, 0.78, 0.91];
-const TWINKLE_SPEED = 0.48;
+const STAR_KNOTS = [0.22, 0.41, 0.58, 0.74, 0.89];
+const TWINKLE_SPEED = 0.34;
 /** Spiral tilt the field flattens out of while it converges. */
-const INTRO_TILT = 0.42;
+const INTRO_TILT = 0.38;
 /** Radians per second the settled field keeps turning about its own axis. */
-const SPIN_SPEED = 0.028;
+const SPIN_SPEED = 0.011;
+/** Static viewing angle baked into the spiral group. */
+const VIEW_TILT_X = 0.045;
+const VIEW_TILT_Y = -0.032;
+const VIEW_TILT_Z = -0.018;
+/** Barely perceptible breathing on the viewing angle once formed. */
+const WOBBLE_X = 0.01;
+const WOBBLE_Y = 0.015;
 
 /**
  * Near-Archimedean spiral with a slight outward bias, so inner turns stay tight
@@ -171,12 +176,12 @@ const BOKEH_VERTEX = `
 		);
 		gl_Position = projectionMatrix * mvPosition;
 
-		float twinkle = 0.84 + 0.16 * sin(uTime * ${TWINKLE_SPEED} + aTwinkle);
+		float twinkle = 0.9 + 0.1 * sin(uTime * ${TWINKLE_SPEED} + aTwinkle);
 		float lit = uAmbient + illumination * uStarBrightness;
 		vColor = color * lit;
 		vBright = lit * (1.0 - vBlur * 0.75) + aSize * 0.035;
 		vAlpha = uOpacity
-			* (0.28 + illumination * 0.62)
+			* (0.42 + illumination * 0.38)
 			* mix(1.0, driftFade, step(0.0001, uDriftSpeed))
 			* twinkle
 			* reveal;
@@ -478,7 +483,6 @@ type SpaceBackgroundProps = {
 export function SpaceBackground({ onReplayReady }: SpaceBackgroundProps) {
 	const containerRef = useRef<HTMLDivElement | null>(null);
 	const replayRef = useRef<(() => void) | null>(null);
-	const [isDragging, setIsDragging] = useState(false);
 
 	const replay = useCallback(() => {
 		replayRef.current?.();
@@ -514,15 +518,15 @@ export function SpaceBackground({ onReplayReady }: SpaceBackgroundProps) {
 		scene.add(stars);
 
 		const spiralGroup = new THREE.Group();
-		spiralGroup.rotation.set(0.08, -0.06, -0.025);
+		spiralGroup.rotation.set(VIEW_TILT_X, VIEW_TILT_Y, VIEW_TILT_Z);
 		scene.add(spiralGroup);
 
 		const dustGeometry = buildSpiralGeometry(DUST_COUNT, "dust");
 		const dustMaterial = createBokehMaterial(0.08, {
-			ambient: 0.65,
-			starBrightness: 0.42,
-			driftDistance: 2.2,
-			driftSpeed: 0.04,
+			ambient: 0.74,
+			starBrightness: 0.26,
+			driftDistance: 0.9,
+			driftSpeed: 0.012,
 			soft: 1,
 		});
 		const dust = new THREE.Points(dustGeometry, dustMaterial);
@@ -542,10 +546,10 @@ export function SpaceBackground({ onReplayReady }: SpaceBackgroundProps) {
 
 		const grainGeometry = buildSpiralGeometry(PARTICLE_COUNT, "grain");
 		const grainMaterial = createBokehMaterial(1, {
-			ambient: 0.92,
-			starBrightness: 0.68,
-			driftDistance: 0.85,
-			driftSpeed: 0.032,
+			ambient: 0.94,
+			starBrightness: 0.4,
+			driftDistance: 0.35,
+			driftSpeed: 0.01,
 		});
 		const grains = new THREE.Points(grainGeometry, grainMaterial);
 		grains.frustumCulled = false;
@@ -578,13 +582,6 @@ export function SpaceBackground({ onReplayReady }: SpaceBackgroundProps) {
 		let formationStart = performance.now();
 		let head = 1;
 		let spin = 0;
-		let targetRotationX = 0;
-		let targetRotationY = 0;
-		let currentRotationX = 0;
-		let currentRotationY = 0;
-		let isPointerDown = false;
-		let lastPointerX = 0;
-		let lastPointerY = 0;
 		const reducedMotion = window.matchMedia(
 			"(prefers-reduced-motion: reduce)",
 		).matches;
@@ -592,50 +589,7 @@ export function SpaceBackground({ onReplayReady }: SpaceBackgroundProps) {
 		replayRef.current = () => {
 			formationStart = performance.now();
 			head = 1;
-			targetRotationX = 0;
-			targetRotationY = 0;
 		};
-
-		const onPointerDown = (event: PointerEvent) => {
-			if (!event.isPrimary || event.button !== 0) return;
-			isPointerDown = true;
-			lastPointerX = event.clientX;
-			lastPointerY = event.clientY;
-			setIsDragging(true);
-			renderer.domElement.setPointerCapture(event.pointerId);
-		};
-
-		const onPointerMove = (event: PointerEvent) => {
-			if (!isPointerDown || !event.isPrimary) return;
-			targetRotationY += (event.clientX - lastPointerX) * 0.005;
-			targetRotationX += (event.clientY - lastPointerY) * 0.005;
-			lastPointerX = event.clientX;
-			lastPointerY = event.clientY;
-		};
-
-		const onPointerUp = (event: PointerEvent) => {
-			if (!isPointerDown) return;
-			isPointerDown = false;
-			setIsDragging(false);
-			if (renderer.domElement.hasPointerCapture(event.pointerId)) {
-				renderer.domElement.releasePointerCapture(event.pointerId);
-			}
-		};
-
-		const onKeyDown = (event: KeyboardEvent) => {
-			if (!event.key.startsWith("Arrow")) return;
-			event.preventDefault();
-			if (event.key === "ArrowLeft") targetRotationY -= 0.08;
-			if (event.key === "ArrowRight") targetRotationY += 0.08;
-			if (event.key === "ArrowUp") targetRotationX -= 0.08;
-			if (event.key === "ArrowDown") targetRotationX += 0.08;
-		};
-
-		renderer.domElement.addEventListener("pointerdown", onPointerDown);
-		renderer.domElement.addEventListener("pointermove", onPointerMove);
-		renderer.domElement.addEventListener("pointerup", onPointerUp);
-		renderer.domElement.addEventListener("pointercancel", onPointerUp);
-		window.addEventListener("keydown", onKeyDown);
 
 		const resize = () => {
 			const width = Math.max(1, container.clientWidth);
@@ -693,24 +647,14 @@ export function SpaceBackground({ onReplayReady }: SpaceBackgroundProps) {
 				material.uniforms.uHead.value = head;
 			}
 
-			if (!isPointerDown) {
-				const returnAmount = 1 - Math.exp(-RETURN_SPRING * delta);
-				targetRotationX += (0 - targetRotationX) * returnAmount;
-				targetRotationY += (0 - targetRotationY) * returnAmount;
-			}
-			const followAmount = 1 - Math.exp(-FOLLOW_DAMPING * delta);
-			currentRotationX +=
-				(targetRotationX - currentRotationX) * followAmount;
-			currentRotationY +=
-				(targetRotationY - currentRotationY) * followAmount;
-			// The field never comes to rest: it keeps turning about its axis with a
-			// slow wobble, so the arms drift past the frame after they have formed.
+			// OpenAI keeps the field almost still: a very slow in-plane turn with only
+			// a hint of breathing on the viewing angle.
 			if (!reducedMotion) spin = (spin + delta * SPIN_SPEED) % (Math.PI * 2);
-			const wobbleX = reducedMotion ? 0 : 0.04 * Math.sin(t * 0.18);
-			const wobbleY = reducedMotion ? 0 : 0.06 * Math.cos(t * 0.22);
-			spiralGroup.rotation.x = 0.08 + wobbleX + currentRotationX;
-			spiralGroup.rotation.y = -0.06 + wobbleY + currentRotationY;
-			spiralGroup.rotation.z = -0.025 + spin;
+			const wobbleX = reducedMotion ? 0 : WOBBLE_X * Math.sin(t * 0.14);
+			const wobbleY = reducedMotion ? 0 : WOBBLE_Y * Math.cos(t * 0.17);
+			spiralGroup.rotation.x = VIEW_TILT_X + wobbleX;
+			spiralGroup.rotation.y = VIEW_TILT_Y + wobbleY;
+			spiralGroup.rotation.z = VIEW_TILT_Z + spin;
 
 			(core.material as THREE.SpriteMaterial).opacity = formation ** 2 * 0.95;
 			(halo.material as THREE.SpriteMaterial).opacity = formation;
@@ -723,12 +667,6 @@ export function SpaceBackground({ onReplayReady }: SpaceBackgroundProps) {
 			window.cancelAnimationFrame(rafId);
 			ro.disconnect();
 			replayRef.current = null;
-			renderer.domElement.removeEventListener("pointerdown", onPointerDown);
-			renderer.domElement.removeEventListener("pointermove", onPointerMove);
-			renderer.domElement.removeEventListener("pointerup", onPointerUp);
-			renderer.domElement.removeEventListener("pointercancel", onPointerUp);
-			window.removeEventListener("keydown", onKeyDown);
-
 			for (const sprite of [halo, core]) {
 				const material = sprite.material as THREE.SpriteMaterial;
 				material.map?.dispose();
@@ -753,8 +691,8 @@ export function SpaceBackground({ onReplayReady }: SpaceBackgroundProps) {
 	return (
 		<div
 			ref={containerRef}
-			className={`absolute inset-0 z-0 ${isDragging ? "cursor-grabbing" : "cursor-grab"}`}
-			aria-label="Drag or use arrow keys to rotate the star field"
+			className="absolute inset-0 z-0"
+			aria-label="Animated spiral star field"
 			role="img"
 		/>
 	);
