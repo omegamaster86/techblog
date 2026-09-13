@@ -86,6 +86,7 @@ const BOKEH_VERTEX = `
 	uniform float uOpacity;
 	uniform float uAmbient;
 	uniform float uStarBrightness;
+	uniform float uExposure;
 	uniform float uHead;
 	uniform float uKnots[${STAR_KNOTS.length}];
 	uniform float uLightReach;
@@ -176,12 +177,12 @@ const BOKEH_VERTEX = `
 		);
 		gl_Position = projectionMatrix * mvPosition;
 
-		float twinkle = 0.9 + 0.1 * sin(uTime * ${TWINKLE_SPEED} + aTwinkle);
+		float twinkle = 0.93 + 0.07 * sin(uTime * ${TWINKLE_SPEED} + aTwinkle);
 		float lit = uAmbient + illumination * uStarBrightness;
-		vColor = color * lit;
-		vBright = lit * (1.0 - vBlur * 0.75) + aSize * 0.035;
+		vColor = color * lit * uExposure;
+		vBright = lit * (1.0 - vBlur * 0.75) + aSize * 0.02;
 		vAlpha = uOpacity
-			* (0.42 + illumination * 0.38)
+			* (0.3 + illumination * 0.24)
 			* mix(1.0, driftFade, step(0.0001, uDriftSpeed))
 			* twinkle
 			* reveal;
@@ -214,12 +215,12 @@ const BOKEH_FRAGMENT = `
 
 		float angle = atan(uv.y, uv.x);
 		float spikes = pow(abs(cos(angle * 2.0)), 11.0) * pow(1.0 - d, 1.4);
-		float starburst = spikes * smoothstep(0.42, 0.92, vBright) * (1.0 - vBlur * 0.9);
+		float starburst = spikes * smoothstep(0.58, 0.96, vBright) * (1.0 - vBlur * 0.92);
 
-		float alpha = mix(bokeh, haze, uSoft) * vAlpha + starburst * vAlpha * 0.42;
+		float alpha = mix(bokeh, haze, uSoft) * vAlpha + starburst * vAlpha * 0.18;
 		if (alpha < 0.004) discard;
 
-		vec3 color = vColor + vec3(starburst * 0.35);
+		vec3 color = vColor + vec3(starburst * 0.12);
 		gl_FragColor = vec4(color, alpha);
 	}
 `;
@@ -240,11 +241,11 @@ function buildSpiralGeometry(count: number, kind: FieldKind) {
 	const scatters = new Float32Array(count * 3);
 	const tangents = new Float32Array(count * 3);
 
-	const white = new THREE.Color("#f7f6f6");
-	const cyan = new THREE.Color("#6dcbf4");
-	const blue = new THREE.Color("#7ab1fe");
-	const ember = new THREE.Color("#f87915");
-	const amber = new THREE.Color("#fa994c");
+	const white = new THREE.Color("#d8d6d4");
+	const cyan = new THREE.Color("#6a9eb8");
+	const blue = new THREE.Color("#6f8eb8");
+	const ember = new THREE.Color("#b86a38");
+	const amber = new THREE.Color("#b88858");
 
 	for (let i = 0; i < count; i++) {
 		const i3 = i * 3;
@@ -314,7 +315,7 @@ function buildSpiralGeometry(count: number, kind: FieldKind) {
 			// Kept small enough that the arms stay grainy instead of fusing into
 			// blown-out ribbons, which is what washes the colour out.
 			const roughness = Math.random() ** 3.6;
-			sizes[i] = (0.8 + roughness * 7.2) * sizeBias * (0.62 + clump * 0.85);
+			sizes[i] = (0.65 + roughness * 5.8) * sizeBias * (0.58 + clump * 0.8);
 			blurs[i] = Math.min(1, roughness * 1.3 + Math.random() * 0.16);
 		}
 
@@ -358,6 +359,8 @@ type BokehOptions = {
 	ambient: number;
 	/** Extra brightness picked up as the light passes. */
 	starBrightness: number;
+	/** Global tone scale to keep additive layers from blowing out. */
+	exposure: number;
 	driftDistance: number;
 	driftSpeed: number;
 	soft?: number;
@@ -379,6 +382,7 @@ function createBokehMaterial(opacity: number, options: BokehOptions) {
 			uSoft: { value: options.soft ?? 0 },
 			uAmbient: { value: options.ambient },
 			uStarBrightness: { value: options.starBrightness },
+			uExposure: { value: options.exposure },
 			uHead: { value: 1 },
 			uKnots: { value: STAR_KNOTS },
 			uLightReach: { value: LIGHT_REACH },
@@ -522,9 +526,10 @@ export function SpaceBackground({ onReplayReady }: SpaceBackgroundProps) {
 		scene.add(spiralGroup);
 
 		const dustGeometry = buildSpiralGeometry(DUST_COUNT, "dust");
-		const dustMaterial = createBokehMaterial(0.08, {
-			ambient: 0.74,
-			starBrightness: 0.26,
+		const dustMaterial = createBokehMaterial(0.055, {
+			ambient: 0.48,
+			starBrightness: 0.16,
+			exposure: 0.62,
 			driftDistance: 0.9,
 			driftSpeed: 0.012,
 			soft: 1,
@@ -534,9 +539,10 @@ export function SpaceBackground({ onReplayReady }: SpaceBackgroundProps) {
 		spiralGroup.add(dust);
 
 		const bulgeGeometry = buildSpiralGeometry(BULGE_COUNT, "bulge");
-		const bulgeMaterial = createBokehMaterial(0.9, {
-			ambient: 1.15,
+		const bulgeMaterial = createBokehMaterial(0.48, {
+			ambient: 0.68,
 			starBrightness: 0,
+			exposure: 0.58,
 			driftDistance: 0,
 			driftSpeed: 0,
 		});
@@ -545,9 +551,10 @@ export function SpaceBackground({ onReplayReady }: SpaceBackgroundProps) {
 		spiralGroup.add(bulge);
 
 		const grainGeometry = buildSpiralGeometry(PARTICLE_COUNT, "grain");
-		const grainMaterial = createBokehMaterial(1, {
-			ambient: 0.94,
-			starBrightness: 0.4,
+		const grainMaterial = createBokehMaterial(0.68, {
+			ambient: 0.56,
+			starBrightness: 0.24,
+			exposure: 0.64,
 			driftDistance: 0.35,
 			driftSpeed: 0.01,
 		});
@@ -557,23 +564,23 @@ export function SpaceBackground({ onReplayReady }: SpaceBackgroundProps) {
 
 		const halo = radialSprite(
 			[
-				[0, "rgba(255,240,220,0.1)"],
-				[0.35, "rgba(220,210,205,0.035)"],
+				[0, "rgba(255,240,220,0.055)"],
+				[0.35, "rgba(220,210,205,0.02)"],
 				[1, "rgba(200,200,210,0)"],
 			],
-			145,
+			130,
 		);
 		spiralGroup.add(halo);
 
 		const core = radialSprite(
 			[
-				[0, "rgba(255,254,250,1)"],
-				[0.12, "rgba(255,250,238,0.9)"],
-				[0.28, "rgba(245,248,255,0.52)"],
-				[0.55, "rgba(220,235,255,0.18)"],
+				[0, "rgba(255,252,246,0.72)"],
+				[0.12, "rgba(255,248,236,0.42)"],
+				[0.28, "rgba(240,244,250,0.16)"],
+				[0.55, "rgba(220,230,245,0.05)"],
 				[1, "rgba(200,220,255,0)"],
 			],
-			44,
+			36,
 		);
 		spiralGroup.add(core);
 
@@ -656,8 +663,8 @@ export function SpaceBackground({ onReplayReady }: SpaceBackgroundProps) {
 			spiralGroup.rotation.y = VIEW_TILT_Y + wobbleY;
 			spiralGroup.rotation.z = VIEW_TILT_Z + spin;
 
-			(core.material as THREE.SpriteMaterial).opacity = formation ** 2 * 0.95;
-			(halo.material as THREE.SpriteMaterial).opacity = formation;
+			(core.material as THREE.SpriteMaterial).opacity = formation ** 2 * 0.62;
+			(halo.material as THREE.SpriteMaterial).opacity = formation * 0.72;
 
 			renderer.render(scene, camera);
 		};
