@@ -1,19 +1,15 @@
 "use client";
 
-import { useRef } from "react";
-import { ReplayButton, SpaceBackground } from "./space-background";
+import { GalaxyVideoBackground } from "./galaxy-video-background";
 
 export function HeroSection() {
-	const replayRef = useRef<(() => void) | null>(null);
-
 	return (
-		<section className="relative h-[min(100svh,720px)] min-h-[480px] overflow-hidden">
-			<SpaceBackground
-				onReplayReady={(replay) => {
-					replayRef.current = replay;
-				}}
+		<section className="relative h-[min(100svh,720px)] min-h-[480px] overflow-hidden bg-black">
+			<GalaxyVideoBackground />
+			<div
+				className="pointer-events-none absolute inset-x-0 bottom-0 z-10 h-32 bg-gradient-to-t from-[#030014] to-transparent"
+				aria-hidden="true"
 			/>
-			<ReplayButton onClick={() => replayRef.current?.()} />
 		</section>
 	);
 }
