@@ -8,7 +8,8 @@
     "start": "next start",
     "lint": "next lint",
     "deploy:convex": "convex deploy",
-    "capture:galaxy": "node scripts/capture-galaxy-video.mjs"
+    "capture:galaxy": "node scripts/capture-galaxy-video.mjs",
+    "capture:openai-astra": "node scripts/capture-openai-astra-video.mjs"
   },
   "dependencies": {
     "@dnd-kit/core": "^6.3.1",
