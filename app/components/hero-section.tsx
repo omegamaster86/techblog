@@ -7,7 +7,7 @@ export function HeroSection() {
 	const replayRef = useRef<(() => void) | null>(null);
 
 	return (
-		<section className="relative min-h-[min(100svh,900px)] overflow-hidden bg-black">
+		<section className="relative h-svh min-h-[480px] overflow-hidden bg-black">
 			<SpaceBackground
 				onReplayReady={(replay) => {
 					replayRef.current = replay;
@@ -15,16 +15,16 @@ export function HeroSection() {
 			/>
 
 			<div
-				className="pointer-events-none absolute inset-0 z-10 flex items-center justify-between px-[clamp(1.25rem,5vw,4.5rem)]"
+				className="pointer-events-none absolute inset-0 z-10 flex items-center justify-between px-[clamp(1.5rem,7vw,6rem)]"
 				aria-hidden="true"
 			>
 				<span
-					className="font-[family-name:var(--font-geist-sans)] text-[clamp(2.75rem,8.5vw,6.25rem)] font-normal leading-none tracking-[-0.04em] text-white"
+					className="font-[family-name:var(--font-geist-sans)] text-[clamp(3rem,9vw,6.75rem)] font-normal leading-none tracking-[-0.045em] text-white"
 				>
 					GPT
 				</span>
 				<span
-					className="font-[family-name:var(--font-geist-sans)] text-[clamp(2.75rem,8.5vw,6.25rem)] font-normal leading-none tracking-[-0.04em] text-white"
+					className="font-[family-name:var(--font-geist-sans)] text-[clamp(3rem,9vw,6.75rem)] font-normal leading-none tracking-[-0.045em] text-white"
 				>
 					Astra
 				</span>

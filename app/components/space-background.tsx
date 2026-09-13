@@ -3,20 +3,20 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import * as THREE from "three";
 
-const PARTICLE_COUNT = 14000;
-const BULGE_COUNT = 2800;
-const DUST_COUNT = 4500;
-const STAR_COUNT = 900;
-const ARM_COUNT = 3;
-const TURNS = 2.65;
+const PARTICLE_COUNT = 16000;
+const BULGE_COUNT = 3200;
+const DUST_COUNT = 4800;
+const STAR_COUNT = 1100;
+const ARM_COUNT = 2;
+const TURNS = 2.75;
 const INNER_RADIUS = 4.5;
 const OUTER_RADIUS = 54;
 const INTRO_DELAY = 0.35;
-const INTRO_DURATION = 2.6;
+const INTRO_DURATION = 2.4;
 const FOLLOW_DAMPING = 6;
 const RETURN_SPRING = 2.8;
 /** Laps per second for the light that runs inward along the arms. */
-const FLOW_SPEED = 0.05;
+const FLOW_SPEED = 0.042;
 /** How far ahead of the travelling head a particle still catches light. */
 const LIGHT_REACH = 0.16;
 /** Fraction of the path that keeps a fading glow behind a head. */
@@ -27,7 +27,7 @@ const TWINKLE_SPEED = 0.48;
 /** Spiral tilt the field flattens out of while it converges. */
 const INTRO_TILT = 0.42;
 /** Radians per second the settled field keeps turning about its own axis. */
-const SPIN_SPEED = 0.042;
+const SPIN_SPEED = 0.028;
 
 /**
  * Near-Archimedean spiral with a slight outward bias, so inner turns stay tight
@@ -278,18 +278,18 @@ function buildSpiralGeometry(count: number, kind: FieldKind) {
 		// cool minority in roughly equal measure.
 		if (kind === "bulge") {
 			color = roll < 0.2 ? amber : white;
-		} else if (roll < 0.11) {
+		} else if (roll < 0.12) {
 			color = ember;
-			sizeBias = 1.05;
-		} else if (roll < 0.22) {
+			sizeBias = 1.08;
+		} else if (roll < 0.25) {
 			color = amber;
-			sizeBias = 1.02;
-		} else if (roll < 0.34) {
+			sizeBias = 1.05;
+		} else if (roll < 0.32) {
 			color = cyan;
-			sizeBias = 0.9;
-		} else if (roll < 0.48) {
+			sizeBias = 0.88;
+		} else if (roll < 0.42) {
 			color = blue;
-			sizeBias = 0.92;
+			sizeBias = 0.9;
 		} else {
 			color = white;
 		}
@@ -308,9 +308,9 @@ function buildSpiralGeometry(count: number, kind: FieldKind) {
 			// Mostly pinpoints, a scattered few blooming into soft bokeh discs.
 			// Kept small enough that the arms stay grainy instead of fusing into
 			// blown-out ribbons, which is what washes the colour out.
-			const roughness = Math.random() ** 3.8;
-			sizes[i] = (0.5 + roughness * 5.4) * sizeBias * (0.58 + clump * 0.82);
-			blurs[i] = Math.min(1, roughness * 1.35 + Math.random() * 0.18);
+			const roughness = Math.random() ** 3.6;
+			sizes[i] = (0.8 + roughness * 7.2) * sizeBias * (0.62 + clump * 0.85);
+			blurs[i] = Math.min(1, roughness * 1.3 + Math.random() * 0.16);
 		}
 
 		ts[i] = t;
@@ -530,8 +530,8 @@ export function SpaceBackground({ onReplayReady }: SpaceBackgroundProps) {
 		spiralGroup.add(dust);
 
 		const bulgeGeometry = buildSpiralGeometry(BULGE_COUNT, "bulge");
-		const bulgeMaterial = createBokehMaterial(0.7, {
-			ambient: 1,
+		const bulgeMaterial = createBokehMaterial(0.9, {
+			ambient: 1.15,
 			starBrightness: 0,
 			driftDistance: 0,
 			driftSpeed: 0,
@@ -542,10 +542,10 @@ export function SpaceBackground({ onReplayReady }: SpaceBackgroundProps) {
 
 		const grainGeometry = buildSpiralGeometry(PARTICLE_COUNT, "grain");
 		const grainMaterial = createBokehMaterial(1, {
-			ambient: 0.8,
-			starBrightness: 0.48,
-			driftDistance: 0.9,
-			driftSpeed: 0.035,
+			ambient: 0.92,
+			starBrightness: 0.68,
+			driftDistance: 0.85,
+			driftSpeed: 0.032,
 		});
 		const grains = new THREE.Points(grainGeometry, grainMaterial);
 		grains.frustumCulled = false;
@@ -564,12 +564,12 @@ export function SpaceBackground({ onReplayReady }: SpaceBackgroundProps) {
 		const core = radialSprite(
 			[
 				[0, "rgba(255,254,250,1)"],
-				[0.12, "rgba(255,250,238,0.78)"],
-				[0.28, "rgba(245,248,255,0.38)"],
-				[0.55, "rgba(220,235,255,0.1)"],
+				[0.12, "rgba(255,250,238,0.9)"],
+				[0.28, "rgba(245,248,255,0.52)"],
+				[0.55, "rgba(220,235,255,0.18)"],
 				[1, "rgba(200,220,255,0)"],
 			],
-			38,
+			44,
 		);
 		spiralGroup.add(core);
 
@@ -712,7 +712,7 @@ export function SpaceBackground({ onReplayReady }: SpaceBackgroundProps) {
 			spiralGroup.rotation.y = -0.06 + wobbleY + currentRotationY;
 			spiralGroup.rotation.z = -0.025 + spin;
 
-			(core.material as THREE.SpriteMaterial).opacity = formation ** 2 * 0.8;
+			(core.material as THREE.SpriteMaterial).opacity = formation ** 2 * 0.95;
 			(halo.material as THREE.SpriteMaterial).opacity = formation;
 
 			renderer.render(scene, camera);
