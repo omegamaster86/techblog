@@ -130,7 +130,7 @@ const BOKEH_VERTEX = `
 		float lit = uAmbient + coreGlow * uCoreBoost;
 		vColor = color * lit;
 		vBright = lit * (1.0 - vBlur * 0.7) + aSize * 0.04 + coreGlow * 0.35;
-		vAlpha = uOpacity * twinkle * reveal * (0.72 + coreGlow * 0.28);
+		vAlpha = uOpacity * twinkle * reveal * (0.58 + coreGlow * 0.32);
 	}
 `;
 
@@ -152,12 +152,12 @@ const BOKEH_FRAGMENT = `
 
 		float angle = atan(uv.y, uv.x);
 		float spikes = pow(abs(cos(angle * 2.0)), 7.0) * pow(1.0 - d, 1.1);
-		float starburst = spikes * smoothstep(0.48, 0.9, vBright) * (1.0 - vBlur * 0.8);
+		float starburst = spikes * smoothstep(0.72, 0.96, vBright) * (1.0 - vBlur * 0.82);
 
-		float alpha = bokeh * vAlpha + starburst * vAlpha * 0.48;
+		float alpha = bokeh * vAlpha + starburst * vAlpha * 0.22;
 		if (alpha < 0.003) discard;
 
-		vec3 col = vColor + vec3(starburst * 0.72);
+		vec3 col = vColor + vec3(starburst * 0.28);
 		gl_FragColor = vec4(col, alpha);
 	}
 `;
@@ -425,7 +425,7 @@ export function SpaceBackground({ onReplayReady }: SpaceBackgroundProps) {
 		renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
 		renderer.outputColorSpace = THREE.SRGBColorSpace;
 		renderer.toneMapping = THREE.ACESFilmicToneMapping;
-		renderer.toneMappingExposure = 1.38;
+		renderer.toneMappingExposure = 0.78;
 		renderer.domElement.style.width = "100%";
 		renderer.domElement.style.height = "100%";
 		renderer.domElement.style.display = "block";
@@ -439,9 +439,9 @@ export function SpaceBackground({ onReplayReady }: SpaceBackgroundProps) {
 		composer.addPass(new RenderPass(scene, camera));
 		const bloomPass = new UnrealBloomPass(
 			new THREE.Vector2(1, 1),
-			0.92,
-			0.62,
-			0.22,
+			0.34,
+			0.82,
+			0.48,
 		);
 		composer.addPass(bloomPass);
 
@@ -453,9 +453,9 @@ export function SpaceBackground({ onReplayReady }: SpaceBackgroundProps) {
 		scene.add(spiralGroup);
 
 		const dustGeometry = buildSpiralGeometry(DUST_COUNT, "dust");
-		const dustMaterial = createBokehMaterial(0.095, {
-			ambient: 0.58,
-			coreBoost: 0.82,
+		const dustMaterial = createBokehMaterial(0.07, {
+			ambient: 0.48,
+			coreBoost: 0.62,
 			soft: true,
 		});
 		const dust = new THREE.Points(dustGeometry, dustMaterial);
@@ -463,18 +463,18 @@ export function SpaceBackground({ onReplayReady }: SpaceBackgroundProps) {
 		spiralGroup.add(dust);
 
 		const bulgeGeometry = buildSpiralGeometry(BULGE_COUNT, "bulge");
-		const bulgeMaterial = createBokehMaterial(1.0, {
-			ambient: 1.05,
-			coreBoost: 1.85,
+		const bulgeMaterial = createBokehMaterial(0.72, {
+			ambient: 0.82,
+			coreBoost: 1.15,
 		});
 		const bulge = new THREE.Points(bulgeGeometry, bulgeMaterial);
 		bulge.frustumCulled = false;
 		spiralGroup.add(bulge);
 
 		const grainGeometry = buildSpiralGeometry(PARTICLE_COUNT, "grain");
-		const grainMaterial = createBokehMaterial(0.95, {
-			ambient: 0.78,
-			coreBoost: 1.35,
+		const grainMaterial = createBokehMaterial(0.72, {
+			ambient: 0.66,
+			coreBoost: 1.0,
 		});
 		const grains = new THREE.Points(grainGeometry, grainMaterial);
 		grains.frustumCulled = false;
@@ -482,23 +482,23 @@ export function SpaceBackground({ onReplayReady }: SpaceBackgroundProps) {
 
 		const halo = radialSprite(
 			[
-				[0, "rgba(255,245,235,0.12)"],
-				[0.3, "rgba(230,225,220,0.04)"],
+				[0, "rgba(255,245,235,0.05)"],
+				[0.3, "rgba(230,225,220,0.015)"],
 				[1, "rgba(200,200,210,0)"],
 			],
-			155,
+			108,
 		);
 		spiralGroup.add(halo);
 
 		const core = radialSprite(
 			[
-				[0, "rgba(255,255,255,1)"],
-				[0.08, "rgba(255,254,248,0.95)"],
-				[0.18, "rgba(250,252,255,0.62)"],
-				[0.38, "rgba(235,242,255,0.2)"],
+				[0, "rgba(255,255,252,0.95)"],
+				[0.1, "rgba(255,252,246,0.55)"],
+				[0.22, "rgba(248,250,255,0.22)"],
+				[0.42, "rgba(230,238,252,0.06)"],
 				[1, "rgba(200,220,255,0)"],
 			],
-			54,
+			26,
 		);
 		spiralGroup.add(core);
 
@@ -570,8 +570,8 @@ export function SpaceBackground({ onReplayReady }: SpaceBackgroundProps) {
 			if (!reducedMotion) spin = (spin + delta * SPIN_SPEED) % (Math.PI * 2);
 			spiralGroup.rotation.z = VIEW_TILT_Z + spin;
 
-			(core.material as THREE.SpriteMaterial).opacity = formation ** 2 * 1.0;
-			(halo.material as THREE.SpriteMaterial).opacity = formation;
+			(core.material as THREE.SpriteMaterial).opacity = formation ** 2 * 0.78;
+			(halo.material as THREE.SpriteMaterial).opacity = formation * 0.7;
 
 			composer.render();
 		};
