@@ -1,6 +1,6 @@
-import { HeroSection } from "./components/hero-section";
-import { LinkForm } from "./components/link-form";
-import { LinkList } from "./components/link-list";
+import { HeroSection } from "../components/hero-section";
+import { LinkForm } from "../components/link-form";
+import { LinkList } from "../components/link-list";
 
 export default function Home() {
 	return (
