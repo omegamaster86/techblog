@@ -40,7 +40,15 @@ yarn-error.log*
 *.tsbuildinfo
 next-env.d.ts
 
-.cursor
+# Cursor: ignore local state but allow committed commands/skills for Cloud Agents
+.cursor/*
+!.cursor/commands/
+!.cursor/commands/**
+!.cursor/skills/
+!.cursor/skills/**
+
+# PR verification media (upload via gh --attach, do not commit)
+pr-artifacts/
 
 package-lock.json
 .npm-cache
