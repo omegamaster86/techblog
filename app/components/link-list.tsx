@@ -48,12 +48,12 @@ function LinkCardContent({
 			withBorder
 			className="flex flex-col h-[160px]"
 			style={{
-				backgroundColor: "rgba(16, 26, 52, 0.48)",
-				borderColor: "rgba(215, 232, 255, 0.22)",
-				backdropFilter: "blur(16px) saturate(155%)",
-				WebkitBackdropFilter: "blur(16px) saturate(155%)",
+				backgroundColor: "rgba(16, 18, 24, 0.58)",
+				borderColor: "rgba(255, 255, 255, 0.16)",
+				backdropFilter: "blur(16px) saturate(150%)",
+				WebkitBackdropFilter: "blur(16px) saturate(150%)",
 				boxShadow:
-					"0 8px 28px rgba(3, 7, 20, 0.42), inset 0 1px 0 rgba(255, 255, 255, 0.1)",
+					"0 8px 28px rgba(0, 0, 0, 0.65), inset 0 1px 0 rgba(255, 255, 255, 0.1)",
 			}}
 		>
 			<Group justify="space-between" mt="md" mb="xs" wrap="nowrap">

@@ -425,8 +425,9 @@ function drawPoisedSolOrb(
 	const outerR = radius * 4.4;
 	const haloOuter = ctx.createRadialGradient(x, y, radius * 0.72, x, y, outerR);
 	haloOuter.addColorStop(0, `rgba(255, 206, 134, ${0.56 * reveal})`);
-	haloOuter.addColorStop(0.24, `rgba(222, 146, 78, ${0.28 * reveal})`);
-	haloOuter.addColorStop(0.55, `rgba(128, 70, 38, ${0.09 * reveal})`);
+	haloOuter.addColorStop(0.24, `rgba(222, 146, 78, ${0.27 * reveal})`);
+	haloOuter.addColorStop(0.54, `rgba(128, 70, 38, ${0.085 * reveal})`);
+	haloOuter.addColorStop(0.78, `rgba(64, 34, 18, ${0.024 * reveal})`);
 	haloOuter.addColorStop(1, "rgba(0, 0, 0, 0)");
 	ctx.fillStyle = haloOuter;
 	ctx.beginPath();
@@ -714,39 +715,22 @@ export function SpaceBackground() {
 				},
 			];
 
-			const bgGrad = staticCtx.createLinearGradient(0, 0, 0, height);
-			bgGrad.addColorStop(0, "#0a1324");
-			bgGrad.addColorStop(0.36, "#060c1b");
-			bgGrad.addColorStop(0.72, "#081224");
-			bgGrad.addColorStop(1, "#112036");
-			staticCtx.fillStyle = bgGrad;
-			staticCtx.fillRect(0, 0, width, height);
-
-			const centerVignette = staticCtx.createRadialGradient(
-				width * 0.48,
-				height * 0.45,
-				width * 0.06,
-				width * 0.48,
-				height * 0.45,
-				width * 0.64,
-			);
-			centerVignette.addColorStop(0, "rgba(3, 10, 22, 0.52)");
-			centerVignette.addColorStop(1, "rgba(14, 28, 52, 0)");
-			staticCtx.fillStyle = centerVignette;
+			staticCtx.fillStyle = "#000000";
 			staticCtx.fillRect(0, 0, width, height);
 
 			staticCtx.save();
 			staticCtx.globalCompositeOperation = "screen";
 			const astraAmb = staticCtx.createRadialGradient(
-				width * 0.66,
+				width * 0.64,
 				height * 0.87,
 				12 * scale,
-				width * 0.66,
+				width * 0.64,
 				height * 0.87,
-				width * 0.36,
+				width * 0.3,
 			);
-			astraAmb.addColorStop(0, "rgba(92, 152, 228, 0.13)");
-			astraAmb.addColorStop(0.5, "rgba(40, 82, 150, 0.06)");
+			astraAmb.addColorStop(0, "rgba(88, 154, 236, 0.11)");
+			astraAmb.addColorStop(0.42, "rgba(40, 84, 156, 0.045)");
+			astraAmb.addColorStop(0.74, "rgba(16, 36, 74, 0.015)");
 			astraAmb.addColorStop(1, "rgba(0, 0, 0, 0)");
 			staticCtx.fillStyle = astraAmb;
 			staticCtx.fillRect(0, 0, width, height);
@@ -924,8 +908,9 @@ export function SpaceBackground() {
 					width * 0.25,
 				);
 				solAmb.addColorStop(0, `rgba(255, 206, 138, ${0.32 * solReveal})`);
-				solAmb.addColorStop(0.26, `rgba(216, 146, 82, ${0.15 * solReveal})`);
-				solAmb.addColorStop(0.58, `rgba(112, 68, 42, ${0.05 * solReveal})`);
+				solAmb.addColorStop(0.26, `rgba(216, 146, 82, ${0.145 * solReveal})`);
+				solAmb.addColorStop(0.56, `rgba(112, 68, 42, ${0.048 * solReveal})`);
+				solAmb.addColorStop(0.78, `rgba(56, 34, 20, ${0.016 * solReveal})`);
 				solAmb.addColorStop(1, "rgba(0, 0, 0, 0)");
 				ctx.fillStyle = solAmb;
 				ctx.fillRect(0, 0, width, height);
@@ -1339,7 +1324,7 @@ export function SpaceBackground() {
 	return (
 		<div
 			ref={containerRef}
-			className="pointer-events-none fixed inset-0 z-0 overflow-hidden"
+			className="pointer-events-none fixed inset-0 z-0 overflow-hidden bg-black"
 			aria-hidden="true"
 		>
 			<canvas ref={canvasRef} className="block h-full w-full" />
