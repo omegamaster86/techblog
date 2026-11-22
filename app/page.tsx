@@ -4,7 +4,7 @@ import { SpaceBackground } from "./components/space-background";
 
 export default function Home() {
 	return (
-		<div className="relative min-h-screen p-4 bg-[#030014]">
+		<div className="relative min-h-screen px-4 pt-12 pb-16 sm:pt-16 bg-[#070b1b] overflow-x-hidden">
 			<SpaceBackground />
 			<div className="relative z-10">
 				<LinkForm />
