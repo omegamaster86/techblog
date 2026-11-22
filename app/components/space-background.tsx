@@ -1,519 +1,1348 @@
 "use client";
 
 import { useEffect, useRef } from "react";
-import * as THREE from "three";
 
-type Planet = {
-	pivot: THREE.Object3D;
-	mesh: THREE.Mesh;
-	orbitSpeed: number;
-	rotationSpeed: number;
+type Point = { x: number; y: number };
+type Rgb = [number, number, number];
+
+type CubicSpec = {
+	p0: Point;
+	p1: Point;
+	p2: Point;
+	p3: Point;
 };
+
+type PathDef = {
+	kind: "gold" | "blue";
+	depth: number;
+	phase: number;
+	speed: number;
+	strong: boolean;
+	endWidthStart: number;
+	endWidthSettled: number;
+	followupDensity: number;
+	samples: Float32Array;
+};
+
+type StarParticle = {
+	pathIndex: number;
+	orbitProgress: number;
+	acrossOffset: number;
+	depthOffset: number;
+	scale: number;
+	layer: number;
+	brightness: number;
+	opacity: number;
+	twinklePhase: number;
+	twinkleRate: number;
+	colorIndex: number;
+	isFollowup: boolean;
+	hasCrossFlare: boolean;
+	hx: number;
+	hy: number;
+	hvx: number;
+	hvy: number;
+};
+
+type DustParticle = {
+	pathIndex: number;
+	orbitProgress: number;
+	acrossOffset: number;
+	depthOffset: number;
+	driftPhase: number;
+	scale: number;
+	opacity: number;
+	colorIndex: number;
+	hx: number;
+	hy: number;
+	hvx: number;
+	hvy: number;
+};
+
+type AmbientStar = {
+	baseX: number;
+	baseY: number;
+	r: number;
+	brightness: number;
+	twinklePhase: number;
+	twinkleRate: number;
+	warm: boolean;
+};
+
+type SpriteBank = {
+	goldStars: HTMLCanvasElement[];
+	blueStars: HTMLCanvasElement[];
+	goldDust: HTMLCanvasElement[];
+	blueDust: HTMLCanvasElement[];
+};
+
+const PATH_SAMPLES = 512;
+const FLOW_SPEED = 0.55;
+const TRAIL_DISPERSION = 0.56;
+const TWINKLE_SPEED = 0.45;
+const DUST_DRIFT_SPEED = 0.2;
+const SCROLL_TRAVEL_SECONDS = 12;
+
+const GOLD_STAR_HEX = ["#FFC77D", "#FFE5BD", "#E8AC62", "#FFF2D9", "#FFFAF0"];
+const BLUE_STAR_HEX = ["#94CCF4", "#D7EDFF", "#639EC4", "#B8E0FA", "#F2FAFF"];
+
+function mulberry32(seed: number) {
+	let a = seed >>> 0;
+	return () => {
+		a |= 0;
+		a = (a + 0x6d2b79f5) | 0;
+		let t = Math.imul(a ^ (a >>> 15), 1 | a);
+		t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+		return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+	};
+}
+
+function gaussianRandom(rand: () => number) {
+	const u = Math.max(1e-6, rand());
+	const v = rand();
+	return Math.sqrt(-2 * Math.log(u)) * Math.cos(2 * Math.PI * v);
+}
+
+function clamp(v: number, min: number, max: number) {
+	return v < min ? min : v > max ? max : v;
+}
+
+function lerp(a: number, b: number, t: number) {
+	return a + (b - a) * t;
+}
+
+function smoothstep(edge0: number, edge1: number, x: number) {
+	const t = clamp((x - edge0) / Math.max(edge1 - edge0, 1e-6), 0, 1);
+	return t * t * (3 - 2 * t);
+}
+
+function smootherstep(edge0: number, edge1: number, x: number) {
+	const t = clamp((x - edge0) / Math.max(edge1 - edge0, 1e-6), 0, 1);
+	return t * t * t * (t * (t * 6 - 15) + 10);
+}
+
+function hexToRgb(hex: string): Rgb {
+	const clean = hex.replace("#", "");
+	const n = Number.parseInt(clean, 16);
+	return [(n >> 16) & 255, (n >> 8) & 255, n & 255];
+}
+
+function sampleCubicChain(segments: CubicSpec[]): Float32Array {
+	const out = new Float32Array(PATH_SAMPLES * 4);
+	const segCount = segments.length;
+
+	const evalSeg = (s: CubicSpec, t: number) => {
+		const u = 1 - t;
+		const uu = u * u;
+		const tt = t * t;
+		const x =
+			uu * u * s.p0.x +
+			3 * uu * t * s.p1.x +
+			3 * u * tt * s.p2.x +
+			tt * t * s.p3.x;
+		const y =
+			uu * u * s.p0.y +
+			3 * uu * t * s.p1.y +
+			3 * u * tt * s.p2.y +
+			tt * t * s.p3.y;
+		const dx =
+			3 * uu * (s.p1.x - s.p0.x) +
+			6 * u * t * (s.p2.x - s.p1.x) +
+			3 * tt * (s.p3.x - s.p2.x);
+		const dy =
+			3 * uu * (s.p1.y - s.p0.y) +
+			6 * u * t * (s.p2.y - s.p1.y) +
+			3 * tt * (s.p3.y - s.p2.y);
+		const len = Math.hypot(dx, dy) || 1;
+		return { x, y, tx: dx / len, ty: dy / len };
+	};
+
+	const rawSteps = 256;
+	const rawX = new Float32Array(rawSteps + 1);
+	const rawY = new Float32Array(rawSteps + 1);
+	const rawTx = new Float32Array(rawSteps + 1);
+	const rawTy = new Float32Array(rawSteps + 1);
+	const cumLen = new Float32Array(rawSteps + 1);
+
+	let totalLen = 0;
+	for (let i = 0; i <= rawSteps; i++) {
+		const uGlobal = i / rawSteps;
+		const scaled = uGlobal * segCount;
+		const segIdx = Math.min(segCount - 1, Math.floor(scaled));
+		const localT = scaled - segIdx;
+		const p = evalSeg(segments[segIdx], localT);
+		rawX[i] = p.x;
+		rawY[i] = p.y;
+		rawTx[i] = p.tx;
+		rawTy[i] = p.ty;
+		if (i > 0) {
+			totalLen += Math.hypot(p.x - rawX[i - 1], p.y - rawY[i - 1]);
+		}
+		cumLen[i] = totalLen;
+	}
+
+	let cursor = 0;
+	for (let i = 0; i < PATH_SAMPLES; i++) {
+		const target = (i / (PATH_SAMPLES - 1)) * totalLen;
+		while (cursor < rawSteps - 1 && cumLen[cursor + 1] < target) {
+			cursor++;
+		}
+		const segLen = Math.max(cumLen[cursor + 1] - cumLen[cursor], 1e-6);
+		const f = clamp((target - cumLen[cursor]) / segLen, 0, 1);
+		const idx = i * 4;
+		out[idx] = lerp(rawX[cursor], rawX[cursor + 1], f);
+		out[idx + 1] = lerp(rawY[cursor], rawY[cursor + 1], f);
+		const tx = lerp(rawTx[cursor], rawTx[cursor + 1], f);
+		const ty = lerp(rawTy[cursor], rawTy[cursor + 1], f);
+		const tLen = Math.hypot(tx, ty) || 1;
+		out[idx + 2] = tx / tLen;
+		out[idx + 3] = ty / tLen;
+	}
+
+	return out;
+}
+
+function lookupPath(samples: Float32Array, progress: number) {
+	const scaled = clamp(progress, 0, 1) * (PATH_SAMPLES - 1);
+	const lo = Math.floor(scaled);
+	const hi = Math.min(lo + 1, PATH_SAMPLES - 1);
+	const f = scaled - lo;
+	const i0 = lo * 4;
+	const i1 = hi * 4;
+	return {
+		x: lerp(samples[i0], samples[i1], f),
+		y: lerp(samples[i0 + 1], samples[i1 + 1], f),
+		tx: lerp(samples[i0 + 2], samples[i1 + 2], f),
+		ty: lerp(samples[i0 + 3], samples[i1 + 3], f),
+	};
+}
+
+function createStarSprite(hex: string, size: number, isDust: boolean) {
+	const c = document.createElement("canvas");
+	c.width = size;
+	c.height = size;
+	const sctx = c.getContext("2d");
+	if (!sctx) return c;
+	const [r, g, b] = hexToRgb(hex);
+	const half = size / 2;
+	const grad = sctx.createRadialGradient(half, half, 0, half, half, half);
+
+	if (isDust) {
+		grad.addColorStop(0, `rgba(${r},${g},${b},0.85)`);
+		grad.addColorStop(0.55, `rgba(${r},${g},${b},0.42)`);
+		grad.addColorStop(1, `rgba(${r},${g},${b},0)`);
+	} else {
+		grad.addColorStop(0, "rgba(255,255,255,1)");
+		grad.addColorStop(
+			0.24,
+			`rgba(${Math.min(255, r + 40)},${Math.min(255, g + 40)},${Math.min(255, b + 40)},0.92)`,
+		);
+		grad.addColorStop(0.56, `rgba(${r},${g},${b},0.35)`);
+		grad.addColorStop(1, `rgba(${r},${g},${b},0)`);
+	}
+
+	sctx.fillStyle = grad;
+	sctx.fillRect(0, 0, size, size);
+	return c;
+}
+
+function buildSpriteBank(): SpriteBank {
+	return {
+		goldStars: GOLD_STAR_HEX.map((hex) => createStarSprite(hex, 32, false)),
+		blueStars: BLUE_STAR_HEX.map((hex) => createStarSprite(hex, 32, false)),
+		goldDust: GOLD_STAR_HEX.map((hex) => createStarSprite(hex, 48, true)),
+		blueDust: BLUE_STAR_HEX.map((hex) => createStarSprite(hex, 48, true)),
+	};
+}
+
+function trailSpreadScale(progress: number, endWidth: number) {
+	const taper = lerp(1, endWidth, smoothstep(0.94, 1, progress));
+	return (
+		taper * (1 + TRAIL_DISPERSION * 11.5 * (1 - clamp(progress, 0, 1)) ** 1.35)
+	);
+}
+
+function stepHoverWake(
+	p: { hx: number; hy: number; hvx: number; hvy: number },
+	screenX: number,
+	screenY: number,
+	scaleFactor: number,
+	particleSizeNorm: number,
+	dt: number,
+	stroke: { x: number; y: number; dx: number; dy: number } | null,
+) {
+	if (dt > 0 && (p.hx || p.hy || p.hvx || p.hvy)) {
+		const n = clamp((particleSizeNorm - 1) / 13, 0, 1);
+		const s = 2.3 / Math.sqrt(0.65 + 1.75 * n * n * (3 - 2 * n));
+		const l = Math.exp(-s * dt);
+		const o = Math.exp(-dt);
+		const c = (o - l) / (s - 1);
+		p.hx = p.hx * o + p.hvx * c;
+		p.hy = p.hy * o + p.hvy * c;
+		p.hvx *= l;
+		p.hvy *= l;
+		if (
+			Math.abs(p.hx) + Math.abs(p.hy) + Math.abs(p.hvx) + Math.abs(p.hvy) <
+			0.02
+		) {
+			p.hx = 0;
+			p.hy = 0;
+			p.hvx = 0;
+			p.hvy = 0;
+		}
+	}
+
+	if (stroke && (stroke.dx !== 0 || stroke.dy !== 0)) {
+		const dist = Math.hypot(
+			screenX + p.hx - stroke.x,
+			screenY + p.hy - stroke.y,
+		);
+		if (dist < 190) {
+			const d = (1 - dist / 190) ** 2;
+			p.hvx += stroke.dx * d * 8 * scaleFactor;
+			p.hvy += stroke.dy * d * 8 * scaleFactor;
+		}
+	}
+}
+
+function drawFourPointFlare(
+	ctx: CanvasRenderingContext2D,
+	x: number,
+	y: number,
+	size: number,
+	coreRadius: number,
+	tint: Rgb,
+	alpha: number,
+	includeDiagonal: boolean,
+	hoverDirX = 0,
+	hoverDirY = 0,
+	hoverStrength = 0,
+) {
+	if (alpha < 0.015 || size < 1) return;
+	ctx.save();
+	ctx.globalCompositeOperation = "lighter";
+
+	const aura = ctx.createRadialGradient(x, y, 0, x, y, size * 0.42);
+	aura.addColorStop(0, `rgba(255,255,255,${0.9 * alpha})`);
+	aura.addColorStop(
+		0.22,
+		`rgba(${tint[0]},${tint[1]},${tint[2]},${0.48 * alpha})`,
+	);
+	aura.addColorStop(
+		0.58,
+		`rgba(${tint[0]},${tint[1]},${tint[2]},${0.1 * alpha})`,
+	);
+	aura.addColorStop(1, "rgba(0,0,0,0)");
+	ctx.fillStyle = aura;
+	ctx.beginPath();
+	ctx.arc(x, y, size * 0.42, 0, Math.PI * 2);
+	ctx.fill();
+
+	const drawHalfSpike = (
+		angle: number,
+		length: number,
+		halfWidth: number,
+		op: number,
+	) => {
+		ctx.save();
+		ctx.translate(x, y);
+		ctx.rotate(angle);
+		const grad = ctx.createLinearGradient(0, 0, length, 0);
+		grad.addColorStop(0, `rgba(255,255,255,${0.98 * op})`);
+		grad.addColorStop(
+			0.35,
+			`rgba(${tint[0]},${tint[1]},${tint[2]},${0.36 * op})`,
+		);
+		grad.addColorStop(1, "rgba(255,255,255,0)");
+		ctx.fillStyle = grad;
+		ctx.beginPath();
+		ctx.moveTo(0, -halfWidth);
+		ctx.quadraticCurveTo(length * 0.45, -halfWidth * 0.28, length, 0);
+		ctx.quadraticCurveTo(length * 0.45, halfWidth * 0.28, 0, halfWidth);
+		ctx.closePath();
+		ctx.fill();
+		ctx.restore();
+	};
+
+	const halfW = Math.max(0.7, size * 0.024);
+	const boost = (dx: number, dy: number) =>
+		1 +
+		hoverStrength *
+			clamp((dx * hoverDirX + dy * hoverDirY) * 0.45, -0.18, 0.36);
+
+	drawHalfSpike(0, size * boost(1, 0), halfW, alpha * boost(1, 0));
+	drawHalfSpike(Math.PI, size * boost(-1, 0), halfW, alpha * boost(-1, 0));
+	drawHalfSpike(
+		Math.PI / 2,
+		size * 0.94 * boost(0, 1),
+		halfW,
+		alpha * boost(0, 1),
+	);
+	drawHalfSpike(
+		-Math.PI / 2,
+		size * 0.94 * boost(0, -1),
+		halfW,
+		alpha * boost(0, -1),
+	);
+
+	if (includeDiagonal) {
+		const diagLen = size * 0.26;
+		const diagW = Math.max(0.5, size * 0.016);
+		drawHalfSpike(Math.PI / 4, diagLen, diagW, alpha * 0.46);
+		drawHalfSpike((-3 * Math.PI) / 4, diagLen, diagW, alpha * 0.46);
+		drawHalfSpike(-Math.PI / 4, diagLen, diagW, alpha * 0.46);
+		drawHalfSpike((3 * Math.PI) / 4, diagLen, diagW, alpha * 0.46);
+	}
+
+	const core = ctx.createRadialGradient(x, y, 0, x, y, coreRadius);
+	core.addColorStop(0, `rgba(255,255,255,${alpha})`);
+	core.addColorStop(0.55, `rgba(255,255,255,${0.86 * alpha})`);
+	core.addColorStop(1, "rgba(255,255,255,0)");
+	ctx.fillStyle = core;
+	ctx.beginPath();
+	ctx.arc(x, y, coreRadius, 0, Math.PI * 2);
+	ctx.fill();
+
+	ctx.restore();
+}
+
+function drawPoisedSolOrb(
+	ctx: CanvasRenderingContext2D,
+	x: number,
+	y: number,
+	radius: number,
+	reveal: number,
+	elapsedSec: number,
+	hoverX: number,
+	hoverY: number,
+	hoverStrength: number,
+) {
+	if (reveal <= 0.005) return;
+
+	ctx.save();
+	ctx.globalCompositeOperation = "screen";
+
+	const outerR = radius * 4.4;
+	const haloOuter = ctx.createRadialGradient(x, y, radius * 0.72, x, y, outerR);
+	haloOuter.addColorStop(0, `rgba(255, 206, 134, ${0.56 * reveal})`);
+	haloOuter.addColorStop(0.24, `rgba(222, 146, 78, ${0.28 * reveal})`);
+	haloOuter.addColorStop(0.55, `rgba(128, 70, 38, ${0.09 * reveal})`);
+	haloOuter.addColorStop(1, "rgba(0, 0, 0, 0)");
+	ctx.fillStyle = haloOuter;
+	ctx.beginPath();
+	ctx.arc(x, y, outerR, 0, Math.PI * 2);
+	ctx.fill();
+
+	const rimR = radius * 1.75;
+	const haloRim = ctx.createRadialGradient(x, y, radius * 0.86, x, y, rimR);
+	haloRim.addColorStop(0, `rgba(255, 246, 224, ${0.95 * reveal})`);
+	haloRim.addColorStop(0.28, `rgba(255, 204, 132, ${0.72 * reveal})`);
+	haloRim.addColorStop(0.65, `rgba(218, 142, 74, ${0.2 * reveal})`);
+	haloRim.addColorStop(1, "rgba(0, 0, 0, 0)");
+	ctx.fillStyle = haloRim;
+	ctx.beginPath();
+	ctx.arc(x, y, rimR, 0, Math.PI * 2);
+	ctx.fill();
+	ctx.restore();
+
+	ctx.save();
+	ctx.globalAlpha = reveal;
+	const limbGrad = ctx.createRadialGradient(
+		x - radius * 0.14,
+		y - radius * 0.14,
+		0,
+		x,
+		y,
+		radius * 1.04,
+	);
+	limbGrad.addColorStop(0, "#fffdf8");
+	limbGrad.addColorStop(0.62, "#fff5df");
+	limbGrad.addColorStop(0.86, "#ffd694");
+	limbGrad.addColorStop(0.96, "#f0aa5a");
+	limbGrad.addColorStop(1, "rgba(240, 170, 90, 0)");
+	ctx.fillStyle = limbGrad;
+	ctx.beginPath();
+	ctx.arc(x, y, radius * 1.04, 0, Math.PI * 2);
+	ctx.fill();
+
+	ctx.globalCompositeOperation = "lighter";
+	const sheenAngle = elapsedSec * 0.18;
+	const sx = x + Math.cos(sheenAngle) * radius * 0.16;
+	const sy = y + Math.sin(sheenAngle * 0.8) * radius * 0.14;
+	const sheen = ctx.createRadialGradient(sx, sy, 0, sx, sy, radius * 0.72);
+	sheen.addColorStop(0, "rgba(255, 250, 232, 0.22)");
+	sheen.addColorStop(0.6, "rgba(255, 206, 132, 0.08)");
+	sheen.addColorStop(1, "rgba(255, 206, 132, 0)");
+	ctx.fillStyle = sheen;
+	ctx.beginPath();
+	ctx.arc(x, y, radius * 0.96, 0, Math.PI * 2);
+	ctx.fill();
+
+	if (hoverStrength > 0.01) {
+		const hx = x + hoverX * radius * 0.55;
+		const hy = y + hoverY * radius * 0.55;
+		const hGrad = ctx.createRadialGradient(hx, hy, 0, hx, hy, radius * 0.95);
+		hGrad.addColorStop(
+			0,
+			`rgba(255, 240, 205, ${0.34 * hoverStrength * reveal})`,
+		);
+		hGrad.addColorStop(1, "rgba(255, 199, 125, 0)");
+		ctx.fillStyle = hGrad;
+		ctx.beginPath();
+		ctx.arc(x, y, radius * 1.35, 0, Math.PI * 2);
+		ctx.fill();
+	}
+	ctx.restore();
+}
 
 export function SpaceBackground() {
 	const containerRef = useRef<HTMLDivElement | null>(null);
+	const canvasRef = useRef<HTMLCanvasElement | null>(null);
 
 	useEffect(() => {
 		const container = containerRef.current;
-		if (!container) return;
+		const canvas = canvasRef.current;
+		if (!container || !canvas) return;
 
-		const renderer = new THREE.WebGLRenderer({
-			antialias: true,
-			alpha: false,
-			powerPreference: "high-performance",
-		});
-		renderer.setClearColor(0x030014, 1);
-		renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
-		renderer.outputColorSpace = THREE.SRGBColorSpace;
-		renderer.toneMapping = THREE.ACESFilmicToneMapping;
-		renderer.toneMappingExposure = 1.0;
-		renderer.domElement.style.width = "100%";
-		renderer.domElement.style.height = "100%";
-		renderer.domElement.style.display = "block";
-		container.appendChild(renderer.domElement);
+		const ctx = canvas.getContext("2d", { alpha: false });
+		if (!ctx) return;
 
-		const scene = new THREE.Scene();
-		scene.fog = new THREE.FogExp2(0x030014, 0.012);
+		const reducedMotionQuery = window.matchMedia(
+			"(prefers-reduced-motion: reduce)",
+		);
 
-		const camera = new THREE.PerspectiveCamera(60, 1, 0.1, 1000);
-		camera.position.set(0, 0, 45);
+		const staticCanvas = document.createElement("canvas");
+		const staticCtx = staticCanvas.getContext("2d", { alpha: false });
+		if (!staticCtx) return;
 
-		const ambient = new THREE.AmbientLight(0xffffff, 0.6);
-		scene.add(ambient);
-		const key = new THREE.PointLight(0x88ccff, 1.2, 200);
-		key.position.set(20, 10, 40);
-		scene.add(key);
-		const sun = new THREE.DirectionalLight(0xfff0d6, 1.0);
-		sun.position.set(-30, 10, 25);
-		scene.add(sun);
+		const sprites = buildSpriteBank();
 
-		// Distant starfield (more realistic: round sprite, varied colors/sizes, subtle twinkle)
-		const starCount = 5200;
-		const starsGeometry = new THREE.BufferGeometry();
-		const starsPositions = new Float32Array(starCount * 3);
-		const starsColors = new Float32Array(starCount * 3);
-		const starsSizes = new Float32Array(starCount);
-		const starsTwinkle = new Float32Array(starCount);
+		let width = 1;
+		let height = 1;
+		let dpr = 1;
+		let scale = 1;
+		let paths: PathDef[] = [];
+		let stars: StarParticle[] = [];
+		let dust: DustParticle[] = [];
+		let ambientStars: AmbientStar[] = [];
+		let solPos: Point = { x: 0, y: 0 };
+		let astraPos: Point = { x: 0, y: 0 };
+		let solRadius = 36;
+		let astraStarSize = 100;
 
-		const starColor = (t: number) => {
-			// Weighted: mostly white/yellow, some blue, a few orange/red
-			if (t < 0.68) return new THREE.Color(0xffffff);
-			if (t < 0.86) return new THREE.Color(0xfff1d6); // warm white
-			if (t < 0.95) return new THREE.Color(0xcfe7ff); // cool blue
-			return new THREE.Color(0xffd1a6); // orange
+		const pointer = {
+			active: false,
+			x: 0,
+			y: 0,
+			prevX: 0,
+			prevY: 0,
+			dx: 0,
+			dy: 0,
+			hoverStrength: 0,
+			solHoverX: 0,
+			solHoverY: 0,
+			solHoverZ: 0,
+			astraHoverX: 0,
+			astraHoverY: 0,
+			astraHoverZ: 0,
 		};
 
-		for (let i = 0; i < starCount; i++) {
-			const i3 = i * 3;
+		let scrollNorm = 0;
+		let smoothScroll = 0;
 
-			// Put stars on a large sphere, with slightly higher density near the galaxy plane
-			const r = 260 + Math.random() * 140;
-			const theta = Math.random() * Math.PI * 2;
-			let y = (Math.random() * 2 - 1) * r;
-			// bias: keep more points near y=0
-			y *= 0.6 + 0.4 * Math.random();
-			const xz = Math.sqrt(Math.max(0, r * r - y * y));
-			const x = Math.cos(theta) * xz;
-			const z = Math.sin(theta) * xz;
+		const readScroll = () => {
+			const h = Math.max(window.innerHeight, 1);
+			const s = clamp(window.scrollY / h, 0, 1);
+			scrollNorm = s * (2 - s);
+		};
 
-			starsPositions[i3] = x;
-			starsPositions[i3 + 1] = y;
-			starsPositions[i3 + 2] = z;
-
-			const c = starColor(Math.random());
-			// tiny random tint variation
-			c.offsetHSL(
-				(Math.random() - 0.5) * 0.02,
-				0,
-				(Math.random() - 0.5) * 0.06,
+		const buildScene = () => {
+			width = Math.max(1, container.clientWidth);
+			height = Math.max(1, container.clientHeight);
+			dpr = Math.min(window.devicePixelRatio || 1, 2);
+			scale = Math.max(
+				0.55,
+				Math.min(1.25, Math.min(width / 1360, height / 980)),
 			);
-			starsColors[i3] = c.r;
-			starsColors[i3 + 1] = c.g;
-			starsColors[i3 + 2] = c.b;
 
-			// size + brightness: many small, few large
-			const size = 0.8 + Math.random() ** 3 * 3.2;
-			starsSizes[i] = size;
-			starsTwinkle[i] = Math.random() * Math.PI * 2;
-		}
+			canvas.width = Math.round(width * dpr);
+			canvas.height = Math.round(height * dpr);
+			staticCanvas.width = canvas.width;
+			staticCanvas.height = canvas.height;
+			staticCtx.setTransform(dpr, 0, 0, dpr, 0, 0);
 
-		starsGeometry.setAttribute(
-			"position",
-			new THREE.BufferAttribute(starsPositions, 3),
-		);
-		starsGeometry.setAttribute(
-			"color",
-			new THREE.BufferAttribute(starsColors, 3),
-		);
-		starsGeometry.setAttribute(
-			"aSize",
-			new THREE.BufferAttribute(starsSizes, 1),
-		);
-		starsGeometry.setAttribute(
-			"aTwinkle",
-			new THREE.BufferAttribute(starsTwinkle, 1),
-		);
+			const isCompact = width < 768;
+			const px = (nx: number) => nx * width;
+			const py = (ny: number) => ny * height;
 
-		const starsMaterial = new THREE.ShaderMaterial({
-			transparent: true,
-			depthWrite: false,
-			blending: THREE.AdditiveBlending,
-			uniforms: {
-				uTime: { value: 0 },
-				uPixelRatio: { value: renderer.getPixelRatio() },
-			},
-			vertexShader: `
-				attribute float aSize;
-				attribute float aTwinkle;
-				varying vec3 vColor;
-				varying float vTwinkle;
-				uniform float uPixelRatio;
-				uniform float uTime;
+			solPos = isCompact
+				? { x: px(0.88), y: py(0.125) }
+				: { x: px(0.912), y: py(0.175) };
+			astraPos = isCompact
+				? { x: px(0.22), y: py(0.835) }
+				: { x: px(0.375), y: py(0.805) };
 
-				void main() {
-					vColor = color;
-					vTwinkle = aTwinkle;
-					vec4 mvPosition = modelViewMatrix * vec4(position, 1.0);
-					float dist = max(1.0, -mvPosition.z);
-					// Perspective sizing, clamped for stability
-					float size = aSize * uPixelRatio * (90.0 / dist);
-					gl_PointSize = clamp(size, 1.0, 6.0);
-					gl_Position = projectionMatrix * mvPosition;
-				}
-			`,
-			fragmentShader: `
-				varying vec3 vColor;
-				varying float vTwinkle;
-				uniform float uTime;
+			solRadius = 37 * scale;
+			astraStarSize = 100 * scale;
 
-				void main() {
-					vec2 uv = gl_PointCoord - vec2(0.5);
-					float d = length(uv);
-					// soft circular falloff
-					float core = smoothstep(0.50, 0.10, d);
-					float halo = smoothstep(0.50, 0.00, d) * 0.35;
+			// Upper Gold front path: left outside -> upper arch -> converges INTO Sol orb
+			const goldFrontSegs: CubicSpec[] = isCompact
+				? [
+						{
+							p0: { x: px(-0.08), y: py(0.22) },
+							p1: { x: px(0.14), y: py(0.05) },
+							p2: { x: px(0.38), y: py(-0.01) },
+							p3: { x: px(0.56), y: py(0.02) },
+						},
+						{
+							p0: { x: px(0.56), y: py(0.02) },
+							p1: { x: px(0.7), y: py(0.03) },
+							p2: { x: px(0.81), y: py(0.07) },
+							p3: solPos,
+						},
+					]
+				: [
+						{
+							p0: { x: px(-0.05), y: py(0.27) },
+							p1: { x: px(0.12), y: py(0.09) },
+							p2: { x: px(0.34), y: py(0.015) },
+							p3: { x: px(0.56), y: py(0.032) },
+						},
+						{
+							p0: { x: px(0.56), y: py(0.032) },
+							p1: { x: px(0.71), y: py(0.042) },
+							p2: { x: px(0.83), y: py(0.095) },
+							p3: solPos,
+						},
+					];
 
-					float tw = 0.88 + 0.12 * sin(uTime * 1.4 + vTwinkle);
-					float alpha = (core + halo) * tw;
-					if (alpha < 0.02) discard;
+			const goldBackSegs: CubicSpec[] = goldFrontSegs.map((s, idx) => ({
+				p0:
+					idx === 0
+						? { x: s.p0.x + px(0.01), y: s.p0.y + py(0.014) }
+						: { x: s.p0.x, y: s.p0.y + py(0.012) },
+				p1: { x: s.p1.x + px(0.008), y: s.p1.y + py(0.014) },
+				p2: { x: s.p2.x + px(0.006), y: s.p2.y + py(0.014) },
+				p3: idx === 1 ? solPos : { x: s.p3.x, y: s.p3.y + py(0.012) },
+			}));
 
-					gl_FragColor = vec4(vColor, alpha);
-				}
-			`,
-			vertexColors: true,
-		});
+			// Lower Blue front path: right outside -> lower arch -> converges INTO Astra 4-point star
+			const blueFrontSegs: CubicSpec[] = isCompact
+				? [
+						{
+							p0: { x: px(1.06), y: py(0.71) },
+							p1: { x: px(0.88), y: py(0.86) },
+							p2: { x: px(0.68), y: py(0.95) },
+							p3: { x: px(0.48), y: py(0.94) },
+						},
+						{
+							p0: { x: px(0.48), y: py(0.94) },
+							p1: { x: px(0.37), y: py(0.93) },
+							p2: { x: px(0.28), y: py(0.89) },
+							p3: astraPos,
+						},
+					]
+				: [
+						{
+							p0: { x: px(1.05), y: py(0.65) },
+							p1: { x: px(0.89), y: py(0.84) },
+							p2: { x: px(0.72), y: py(0.95) },
+							p3: { x: px(0.58), y: py(0.925) },
+						},
+						{
+							p0: { x: px(0.58), y: py(0.925) },
+							p1: { x: px(0.49), y: py(0.915) },
+							p2: { x: px(0.42), y: py(0.87) },
+							p3: astraPos,
+						},
+					];
 
-		const stars = new THREE.Points(starsGeometry, starsMaterial);
-		scene.add(stars);
+			const blueBackSegs: CubicSpec[] = blueFrontSegs.map((s, idx) => ({
+				p0:
+					idx === 0
+						? { x: s.p0.x - px(0.01), y: s.p0.y - py(0.012) }
+						: { x: s.p0.x, y: s.p0.y - py(0.01) },
+				p1: { x: s.p1.x - px(0.008), y: s.p1.y - py(0.012) },
+				p2: { x: s.p2.x - px(0.006), y: s.p2.y - py(0.01) },
+				p3: idx === 1 ? astraPos : { x: s.p3.x, y: s.p3.y - py(0.01) },
+			}));
 
-		// Spiral galaxy (swirl)
-		const galaxy = new THREE.Group();
-		scene.add(galaxy);
+			paths = [
+				{
+					kind: "gold",
+					depth: 0.22,
+					phase: 0.16,
+					speed: 0.025,
+					strong: true,
+					endWidthStart: 1,
+					endWidthSettled: 1,
+					followupDensity: 0,
+					samples: sampleCubicChain(goldFrontSegs),
+				},
+				{
+					kind: "gold",
+					depth: -0.16,
+					phase: 0.72,
+					speed: -0.018,
+					strong: false,
+					endWidthStart: 1,
+					endWidthSettled: 1,
+					followupDensity: 0,
+					samples: sampleCubicChain(goldBackSegs),
+				},
+				{
+					kind: "blue",
+					depth: 0.24,
+					phase: 0.38,
+					speed: 0.021,
+					strong: true,
+					endWidthStart: 0.22,
+					endWidthSettled: 0.55,
+					followupDensity: 0.6,
+					samples: sampleCubicChain(blueFrontSegs),
+				},
+				{
+					kind: "blue",
+					depth: -0.18,
+					phase: 0.58,
+					speed: -0.016,
+					strong: false,
+					endWidthStart: 0.22,
+					endWidthSettled: 0.55,
+					followupDensity: 0.6,
+					samples: sampleCubicChain(blueBackSegs),
+				},
+			];
 
-		const galaxyCount = 12000;
-		const galaxyGeometry = new THREE.BufferGeometry();
-		const galaxyPositions = new Float32Array(galaxyCount * 3);
-		const galaxyColors = new Float32Array(galaxyCount * 3);
-		const galaxySizes = new Float32Array(galaxyCount);
-		const galaxyTwinkle = new Float32Array(galaxyCount);
-		const innerColor = new THREE.Color("#b388ff");
-		const outerColor = new THREE.Color("#00d9ff");
-		for (let i = 0; i < galaxyCount; i++) {
-			const i3 = i * 3;
-			const radius = Math.random() ** 0.55 * 50;
-			const branch = i % 4;
-			const branchAngle = (branch / 4) * Math.PI * 2;
-			const spinAngle = radius * 0.35;
-			const randomX = (Math.random() - 0.5) * 0.9 * (1 - radius / 55);
-			const randomY = (Math.random() - 0.5) * 0.4 * (1 - radius / 55);
-			const randomZ = (Math.random() - 0.5) * 0.9 * (1 - radius / 55);
-			const angle = branchAngle + spinAngle;
+			const bgGrad = staticCtx.createLinearGradient(0, 0, 0, height);
+			bgGrad.addColorStop(0, "#0a1324");
+			bgGrad.addColorStop(0.36, "#060c1b");
+			bgGrad.addColorStop(0.72, "#081224");
+			bgGrad.addColorStop(1, "#112036");
+			staticCtx.fillStyle = bgGrad;
+			staticCtx.fillRect(0, 0, width, height);
 
-			galaxyPositions[i3] = Math.cos(angle) * radius + randomX;
-			galaxyPositions[i3 + 1] = randomY * 8;
-			galaxyPositions[i3 + 2] = Math.sin(angle) * radius + randomZ;
+			const centerVignette = staticCtx.createRadialGradient(
+				width * 0.48,
+				height * 0.45,
+				width * 0.06,
+				width * 0.48,
+				height * 0.45,
+				width * 0.64,
+			);
+			centerVignette.addColorStop(0, "rgba(3, 10, 22, 0.52)");
+			centerVignette.addColorStop(1, "rgba(14, 28, 52, 0)");
+			staticCtx.fillStyle = centerVignette;
+			staticCtx.fillRect(0, 0, width, height);
 
-			const mixed = innerColor.clone().lerp(outerColor, radius / 55);
-			galaxyColors[i3] = mixed.r;
-			galaxyColors[i3 + 1] = mixed.g;
-			galaxyColors[i3 + 2] = mixed.b;
+			staticCtx.save();
+			staticCtx.globalCompositeOperation = "screen";
+			const astraAmb = staticCtx.createRadialGradient(
+				width * 0.66,
+				height * 0.87,
+				12 * scale,
+				width * 0.66,
+				height * 0.87,
+				width * 0.36,
+			);
+			astraAmb.addColorStop(0, "rgba(92, 152, 228, 0.13)");
+			astraAmb.addColorStop(0.5, "rgba(40, 82, 150, 0.06)");
+			astraAmb.addColorStop(1, "rgba(0, 0, 0, 0)");
+			staticCtx.fillStyle = astraAmb;
+			staticCtx.fillRect(0, 0, width, height);
+			staticCtx.restore();
 
-			// keep galaxy points small; add subtle per-point variation
-			galaxySizes[i] = 0.7 + Math.random() ** 2 * 1.8;
-			galaxyTwinkle[i] = Math.random() * Math.PI * 2;
-		}
-		galaxyGeometry.setAttribute(
-			"position",
-			new THREE.BufferAttribute(galaxyPositions, 3),
-		);
-		galaxyGeometry.setAttribute(
-			"color",
-			new THREE.BufferAttribute(galaxyColors, 3),
-		);
-		galaxyGeometry.setAttribute(
-			"aSize",
-			new THREE.BufferAttribute(galaxySizes, 1),
-		);
-		galaxyGeometry.setAttribute(
-			"aTwinkle",
-			new THREE.BufferAttribute(galaxyTwinkle, 1),
-		);
+			const rand = mulberry32(20261124);
+			const density = isCompact ? 0.62 : 1;
 
-		// Use ShaderMaterial (same approach as stars) to avoid square point sprites
-		const galaxyMaterial = new THREE.ShaderMaterial({
-			transparent: true,
-			depthWrite: false,
-			blending: THREE.AdditiveBlending,
-			uniforms: {
-				uTime: { value: 0 },
-				uPixelRatio: { value: renderer.getPixelRatio() },
-			},
-			vertexShader: `
-				attribute float aSize;
-				attribute float aTwinkle;
-				varying vec3 vColor;
-				varying float vTwinkle;
-				uniform float uPixelRatio;
-				uniform float uTime;
-
-				void main() {
-					vColor = color;
-					vTwinkle = aTwinkle;
-					vec4 mvPosition = modelViewMatrix * vec4(position, 1.0);
-					float dist = max(1.0, -mvPosition.z);
-					// Slightly smaller than stars; still perspective-aware
-					float size = aSize * uPixelRatio * (38.0 / dist);
-					gl_PointSize = clamp(size, 1.0, 4.0);
-					gl_Position = projectionMatrix * mvPosition;
-				}
-			`,
-			fragmentShader: `
-				varying vec3 vColor;
-				varying float vTwinkle;
-				uniform float uTime;
-
-				void main() {
-					vec2 uv = gl_PointCoord - vec2(0.5);
-					float d = length(uv);
-					// soft circular falloff
-					float core = smoothstep(0.50, 0.12, d);
-					float halo = smoothstep(0.50, 0.00, d) * 0.28;
-
-					float tw = 0.92 + 0.08 * sin(uTime * 0.9 + vTwinkle);
-					float alpha = (core + halo) * tw;
-					if (alpha < 0.02) discard;
-
-					gl_FragColor = vec4(vColor, alpha);
-				}
-			`,
-			vertexColors: true,
-		});
-		const galaxyPoints = new THREE.Points(galaxyGeometry, galaxyMaterial);
-		galaxy.add(galaxyPoints);
-
-		// Planet textures (public/ -> served from /textures/*)
-		const texLoader = new THREE.TextureLoader();
-		const earthMap = texLoader.load("/textures/earth.png");
-		earthMap.colorSpace = THREE.SRGBColorSpace;
-		const marsMap = texLoader.load("/textures/mars.jpg");
-		marsMap.colorSpace = THREE.SRGBColorSpace;
-		const jupiterMap = texLoader.load("/textures/jupiter.jpg");
-		jupiterMap.colorSpace = THREE.SRGBColorSpace;
-		const mercuryMap = texLoader.load("/textures/mercury.jpg");
-		mercuryMap.colorSpace = THREE.SRGBColorSpace;
-		const venusMap = texLoader.load("/textures/venus.jpg");
-		venusMap.colorSpace = THREE.SRGBColorSpace;
-		const saturnMap = texLoader.load("/textures/saturn.jpg");
-		saturnMap.colorSpace = THREE.SRGBColorSpace;
-		const uranusMap = texLoader.load("/textures/uranus.jpg");
-		uranusMap.colorSpace = THREE.SRGBColorSpace;
-		const neptuneMap = texLoader.load("/textures/neptune.jpg");
-		neptuneMap.colorSpace = THREE.SRGBColorSpace;
-
-		const createPlanet = (
-			radius: number,
-			map: THREE.Texture,
-			orbitRadius: number,
-			orbitSpeed: number,
-			rotationSpeed: number,
-			materialTuning?: Partial<
-				Pick<
-					THREE.MeshStandardMaterialParameters,
-					"roughness" | "metalness" | "emissive" | "emissiveIntensity"
-				>
-			>,
-		): Planet => {
-			const pivot = new THREE.Object3D();
-			const geometry = new THREE.SphereGeometry(radius, 48, 48);
-			const materialParams: THREE.MeshStandardMaterialParameters = {
-				map,
-				roughness: materialTuning?.roughness ?? 0.9,
-				metalness: materialTuning?.metalness ?? 0.0,
-			};
-			if (materialTuning?.emissive !== undefined) {
-				materialParams.emissive = materialTuning.emissive;
+			ambientStars = [];
+			const ambientCount = Math.round(115 * density);
+			for (let i = 0; i < ambientCount; i++) {
+				ambientStars.push({
+					baseX: rand() * width,
+					baseY: rand() * height,
+					r: (0.45 + rand() * 0.9) * scale,
+					brightness: 0.35 + rand() * 0.65,
+					twinklePhase: rand() * Math.PI * 2,
+					twinkleRate: 0.6 + rand() * 1.1,
+					warm: rand() > 0.78,
+				});
 			}
-			if (materialTuning?.emissiveIntensity !== undefined) {
-				materialParams.emissiveIntensity = materialTuning.emissiveIntensity;
+
+			stars = [];
+			dust = [];
+			const baseWidthPx = 8.2 * scale;
+
+			for (let pIdx = 0; pIdx < paths.length; pIdx++) {
+				const path = paths[pIdx];
+				const isFront = path.strong;
+				const mainStarCount = Math.round((isFront ? 410 : 220) * density);
+				const followupStarCount = Math.round(
+					mainStarCount * path.followupDensity * 0.55,
+				);
+				const totalStars = mainStarCount + followupStarCount;
+
+				for (let i = 0; i < totalStars; i++) {
+					const isFollowup = i >= mainStarCount;
+					const starScale = 0.45 + rand() ** 1.7 * 2.15;
+					const depthOffset = (rand() - 0.5) * 1 + path.depth;
+					const layer = clamp(
+						starScale * 0.34 + (depthOffset + 0.5) * 0.45,
+						0,
+						1,
+					);
+					const brightness = 0.55 + rand() ** 2.4 * 2.1;
+					const hasCrossFlare = isFront && brightness > 1.85 && rand() < 0.24;
+
+					stars.push({
+						pathIndex: pIdx,
+						orbitProgress: rand(),
+						acrossOffset:
+							gaussianRandom(rand) * baseWidthPx * (isFront ? 0.72 : 0.92),
+						depthOffset,
+						scale: starScale,
+						layer,
+						brightness,
+						opacity: (isFront ? 0.45 : 0.32) + rand() * 0.52,
+						twinklePhase: rand() * Math.PI * 2,
+						twinkleRate: 0.65 + rand() * 1.15,
+						colorIndex: Math.floor(rand() * 5),
+						isFollowup,
+						hasCrossFlare,
+						hx: 0,
+						hy: 0,
+						hvx: 0,
+						hvy: 0,
+					});
+				}
+
+				const dustCount = Math.round((isFront ? 220 : 120) * density);
+				for (let i = 0; i < dustCount; i++) {
+					dust.push({
+						pathIndex: pIdx,
+						orbitProgress: rand(),
+						acrossOffset:
+							gaussianRandom(rand) * baseWidthPx * (isFront ? 0.95 : 1.1),
+						depthOffset: (rand() - 0.5) * 0.8 + path.depth,
+						driftPhase: rand(),
+						scale: (0.7 + rand() * 1.9) * scale,
+						opacity: (isFront ? 0.24 : 0.16) + rand() * 0.24,
+						colorIndex: Math.floor(rand() * 5),
+						hx: 0,
+						hy: 0,
+						hvx: 0,
+						hvy: 0,
+					});
+				}
 			}
-			const material = new THREE.MeshStandardMaterial(materialParams);
-			const mesh = new THREE.Mesh(geometry, material);
-			mesh.position.x = orbitRadius;
-			pivot.add(mesh);
-			galaxy.add(pivot);
-			return { pivot, mesh, orbitSpeed, rotationSpeed };
 		};
 
-		// 8 planets (Mercury → Neptune)
-		const planets: Planet[] = [
-			createPlanet(0.7, mercuryMap, 7, 0.42, 0.45, {
-				roughness: 0.98,
-				metalness: 0.0,
-			}),
-			createPlanet(1.05, venusMap, 9, 0.32, 0.12, {
-				roughness: 0.96,
-				metalness: 0.0,
-			}),
-			createPlanet(1.4, earthMap, 11.5, 0.26, 0.35, {
-				roughness: 0.9,
-				metalness: 0.0,
-			}),
-			createPlanet(1.15, marsMap, 14, 0.21, 0.22, {
-				roughness: 0.95,
-				metalness: 0.0,
-			}),
-			createPlanet(2.6, jupiterMap, 20, 0.14, 0.12, {
-				roughness: 0.92,
-				metalness: 0.0,
-			}),
-			createPlanet(2.2, saturnMap, 26, 0.11, 0.11, {
-				roughness: 0.93,
-				metalness: 0.0,
-			}),
-			createPlanet(1.8, uranusMap, 31, 0.085, 0.08, {
-				roughness: 0.94,
-				metalness: 0.0,
-			}),
-			createPlanet(1.9, neptuneMap, 36, 0.07, 0.09, {
-				roughness: 0.94,
-				metalness: 0.0,
-			}),
-		];
-		// Approx. axial tilts (radians)
-		planets[0]?.mesh.rotateZ(THREE.MathUtils.degToRad(0.03)); // Mercury
-		planets[1]?.mesh.rotateZ(THREE.MathUtils.degToRad(177.4)); // Venus (retrograde-ish)
-		planets[2]?.mesh.rotateZ(THREE.MathUtils.degToRad(23.5)); // Earth
-		planets[3]?.mesh.rotateZ(THREE.MathUtils.degToRad(25.2)); // Mars
-		planets[4]?.mesh.rotateZ(THREE.MathUtils.degToRad(3.1)); // Jupiter
-		planets[5]?.mesh.rotateZ(THREE.MathUtils.degToRad(26.7)); // Saturn
-		planets[6]?.mesh.rotateZ(THREE.MathUtils.degToRad(97.8)); // Uranus
-		planets[7]?.mesh.rotateZ(THREE.MathUtils.degToRad(28.3)); // Neptune
+		const renderFrame = (
+			elapsedSec: number,
+			dtSec: number,
+			isReduced: boolean,
+		) => {
+			smoothScroll += (scrollNorm - smoothScroll) * Math.min(1, dtSec * 8 || 1);
+			const scrollVal = isReduced ? 0 : smoothScroll;
 
-		// Saturn ring (procedural-ish, no external asset)
-		const saturnPivot = planets[5]?.pivot;
-		const saturnMesh = planets[5]?.mesh;
-		let saturnRing: THREE.Mesh | undefined;
-		if (saturnPivot && saturnMesh) {
-			const ringCanvas = document.createElement("canvas");
-			ringCanvas.width = 512;
-			ringCanvas.height = 64;
-			const ctx = ringCanvas.getContext("2d");
-			if (ctx) {
-				const g = ctx.createLinearGradient(0, 0, ringCanvas.width, 0);
-				// subtle banding similar to Saturn rings
-				g.addColorStop(0.0, "rgba(255,255,255,0)");
-				g.addColorStop(0.08, "rgba(240,220,190,0.10)");
-				g.addColorStop(0.18, "rgba(255,245,220,0.22)");
-				g.addColorStop(0.35, "rgba(220,200,170,0.18)");
-				g.addColorStop(0.55, "rgba(255,245,220,0.25)");
-				g.addColorStop(0.72, "rgba(210,190,160,0.16)");
-				g.addColorStop(0.9, "rgba(255,245,220,0.10)");
-				g.addColorStop(1.0, "rgba(255,255,255,0)");
-				ctx.fillStyle = g;
-				ctx.fillRect(0, 0, ringCanvas.width, ringCanvas.height);
+			const stroke =
+				!isReduced && pointer.active && (pointer.dx !== 0 || pointer.dy !== 0)
+					? {
+							x: pointer.x,
+							y: pointer.y,
+							dx: pointer.dx,
+							dy: pointer.dy,
+						}
+					: null;
+			pointer.dx = 0;
+			pointer.dy = 0;
 
-				// add thin gaps
-				ctx.globalCompositeOperation = "destination-out";
-				ctx.fillStyle = "rgba(0,0,0,0.35)";
-				for (let x = 40; x < ringCanvas.width; x += 70) {
-					ctx.fillRect(x, 0, 2, ringCanvas.height);
+			const dampAlpha = 1 - Math.exp(-14 * Math.max(dtSec, 0.016));
+			pointer.hoverStrength = lerp(
+				pointer.hoverStrength,
+				!isReduced && pointer.active ? 1 : 0,
+				dampAlpha,
+			);
+
+			const introTime = isReduced ? 10 : elapsedSec;
+			const solReveal = smootherstep(0.6, 1.65, introTime);
+			const goldFadeProgress = clamp((introTime - 0.6) / 2.6, 0, 1);
+			const blueStarReveal = smootherstep(1.77, 2.82, introTime);
+			const blueFadeProgress = clamp((introTime - 1.77) / 2.6, 0, 1);
+			const followupReveal = clamp((introTime - 4.37) / 1.8, 0, 1);
+			const blueEndWidth = lerp(0.22, 0.55, smoothstep(0, 1, followupReveal));
+			const skyReveal = smootherstep(0, 0.55, introTime);
+
+			if (!isReduced && pointer.active) {
+				const solReach = solRadius * 3.4;
+				const sdx = (pointer.x - solPos.x) / solReach;
+				const sdy = (pointer.y - solPos.y) / solReach;
+				const sDist = Math.hypot(sdx, sdy);
+				const sInf = 1 - smoothstep(0.35, 1, sDist);
+				if (sInf > 0) {
+					pointer.solHoverX = lerp(pointer.solHoverX, sdx, dampAlpha);
+					pointer.solHoverY = lerp(pointer.solHoverY, sdy, dampAlpha);
 				}
-				ctx.globalCompositeOperation = "source-over";
+				pointer.solHoverZ = lerp(
+					pointer.solHoverZ,
+					sInf * solReveal,
+					dampAlpha,
+				);
+
+				const astraReach = astraStarSize * 1.75;
+				const adx = (pointer.x - astraPos.x) / astraReach;
+				const ady = (pointer.y - astraPos.y) / astraReach;
+				const aDist = Math.hypot(adx, ady);
+				const aInf = 1 - smoothstep(0.35, 1, aDist);
+				if (aInf > 0) {
+					pointer.astraHoverX = lerp(pointer.astraHoverX, adx, dampAlpha);
+					pointer.astraHoverY = lerp(pointer.astraHoverY, ady, dampAlpha);
+				}
+				pointer.astraHoverZ = lerp(
+					pointer.astraHoverZ,
+					aInf * blueStarReveal,
+					dampAlpha,
+				);
+			} else {
+				pointer.solHoverZ = lerp(pointer.solHoverZ, 0, dampAlpha);
+				pointer.astraHoverZ = lerp(pointer.astraHoverZ, 0, dampAlpha);
 			}
-			const ringTex = new THREE.CanvasTexture(ringCanvas);
-			ringTex.colorSpace = THREE.SRGBColorSpace;
-			const ringGeo = new THREE.RingGeometry(2.8, 4.6, 96, 2);
-			const ringMat = new THREE.MeshBasicMaterial({
-				map: ringTex,
-				transparent: true,
-				opacity: 0.75,
-				side: THREE.DoubleSide,
-				depthWrite: false,
-				blending: THREE.AdditiveBlending,
-			});
-			saturnRing = new THREE.Mesh(ringGeo, ringMat);
-			saturnRing.rotation.x = THREE.MathUtils.degToRad(74); // tilt a bit
-			saturnRing.position.copy(saturnMesh.position);
-			saturnPivot.add(saturnRing);
-		}
 
-		// Simple atmosphere glow for Earth
-		const earth = planets[0]?.mesh;
-		let atmosphere: THREE.Mesh | undefined;
-		if (earth) {
-			const atmoGeo = new THREE.SphereGeometry(1.4 * 1.05, 48, 48);
-			const atmoMat = new THREE.MeshBasicMaterial({
-				color: 0x66b3ff,
-				transparent: true,
-				opacity: 0.08,
-				blending: THREE.AdditiveBlending,
-				depthWrite: false,
-			});
-			atmosphere = new THREE.Mesh(atmoGeo, atmoMat);
-			atmosphere.position.copy(earth.position);
-			planets[0]?.pivot.add(atmosphere);
-		}
+			ctx.setTransform(1, 0, 0, 1, 0, 0);
+			ctx.drawImage(staticCanvas, 0, 0);
+			ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
 
-		const resize = () => {
-			const width = Math.max(1, container.clientWidth);
-			const height = Math.max(1, container.clientHeight);
-			renderer.setSize(width, height, false);
-			starsMaterial.uniforms.uPixelRatio.value = renderer.getPixelRatio();
-			galaxyMaterial.uniforms.uPixelRatio.value = renderer.getPixelRatio();
-			camera.aspect = width / height;
-			camera.updateProjectionMatrix();
+			if (solReveal > 0.01) {
+				ctx.save();
+				ctx.globalCompositeOperation = "screen";
+				const solAmb = ctx.createRadialGradient(
+					solPos.x,
+					solPos.y,
+					6 * scale,
+					solPos.x,
+					solPos.y,
+					width * 0.25,
+				);
+				solAmb.addColorStop(0, `rgba(255, 206, 138, ${0.32 * solReveal})`);
+				solAmb.addColorStop(0.26, `rgba(216, 146, 82, ${0.15 * solReveal})`);
+				solAmb.addColorStop(0.58, `rgba(112, 68, 42, ${0.05 * solReveal})`);
+				solAmb.addColorStop(1, "rgba(0, 0, 0, 0)");
+				ctx.fillStyle = solAmb;
+				ctx.fillRect(0, 0, width, height);
+				ctx.restore();
+			}
+
+			const cx = width * 0.5;
+			const cy = height * 0.5;
+			const hoverPushRadius = 0.28 * Math.min(width, height);
+			for (const s of ambientStars) {
+				const radialFactor = 1 + scrollVal * (0.05 + s.brightness * 0.08);
+				let sx = cx + (s.baseX - cx) * radialFactor;
+				let sy = cy + (s.baseY - cy) * radialFactor;
+
+				if (pointer.hoverStrength > 0.01) {
+					const awayX = sx - pointer.x;
+					const awayY = sy - pointer.y;
+					const dist = Math.hypot(awayX, awayY);
+					if (dist < hoverPushRadius) {
+						const inf = 1 - smoothstep(0, hoverPushRadius, dist);
+						const push = inf * pointer.hoverStrength * 18 * scale;
+						const inv = 1 / Math.max(dist, 12);
+						sx += awayX * inv * push;
+						sy += awayY * inv * push;
+					}
+				}
+
+				const twinkle =
+					0.86 +
+					0.14 *
+						Math.sin(
+							s.twinklePhase +
+								(isReduced ? 0 : elapsedSec) * TWINKLE_SPEED * s.twinkleRate,
+						);
+				const alpha = s.brightness * 0.62 * twinkle * skyReveal;
+				ctx.fillStyle = s.warm
+					? `rgba(255, 236, 205, ${alpha})`
+					: `rgba(186, 222, 252, ${alpha})`;
+				ctx.beginPath();
+				ctx.arc(sx, sy, s.r, 0, Math.PI * 2);
+				ctx.fill();
+			}
+
+			const pathOffsets = new Float32Array(paths.length);
+			const pathHeads = new Float32Array(paths.length);
+			for (let i = 0; i < paths.length; i++) {
+				const path = paths[i];
+				const scrollShift =
+					scrollVal * SCROLL_TRAVEL_SECONDS * path.speed * FLOW_SPEED;
+				const timeShift = isReduced ? 0 : elapsedSec * path.speed * FLOW_SPEED;
+				pathOffsets[i] = timeShift + scrollShift;
+
+				const rawTravel = isReduced
+					? path.phase
+					: (((path.phase +
+							elapsedSec * Math.abs(path.speed) +
+							Math.abs(scrollShift)) %
+							1) +
+							1) %
+						1;
+				pathHeads[i] = path.speed < 0 ? 1 - rawTravel : rawTravel;
+			}
+
+			// Orbital dust layer illuminated by traveling light head + trailing wake
+			ctx.save();
+			ctx.globalCompositeOperation = "lighter";
+			for (const d of dust) {
+				const path = paths[d.pathIndex];
+				const isGold = path.kind === "gold";
+				const fadeProgress = isGold ? goldFadeProgress : blueFadeProgress;
+				if (fadeProgress <= 0.001) continue;
+
+				const endWidth = isGold ? 1 : blueEndWidth;
+				const direction = path.speed >= 0 ? 1 : -1;
+				const head = pathHeads[d.pathIndex];
+				const lightReach = path.strong ? 0.2 : 0.17;
+
+				const distToHead = Math.abs(d.orbitProgress - head);
+				let illum = 1 - smoothstep(lightReach * 0.08, lightReach, distToHead);
+				illum *= illum;
+
+				let distBehind =
+					direction > 0 ? head - d.orbitProgress : d.orbitProgress - head;
+				if (distBehind < 0) distBehind += 1;
+				let trailIllum = 1 - smoothstep(0, 0.32, distBehind);
+				trailIllum *= trailIllum;
+				illum = Math.max(illum, trailIllum * 0.68);
+
+				const distFromSource =
+					direction > 0 ? d.orbitProgress : 1 - d.orbitProgress;
+				const fadeStart = 0.54 * distFromSource + 0.2 * d.driftPhase;
+				const revealAlpha = smoothstep(
+					fadeStart,
+					fadeStart + 0.26,
+					fadeProgress,
+				);
+				if (revealAlpha < 0.01) continue;
+
+				const driftCycle = isReduced
+					? 0.5
+					: (d.driftPhase + elapsedSec * DUST_DRIFT_SPEED) % 1;
+				const driftFade = isReduced
+					? 1
+					: smoothstep(0, 0.1, driftCycle) *
+						(1 - smoothstep(0.9, 1, driftCycle));
+
+				const sample = lookupPath(path.samples, d.orbitProgress);
+				const spread = trailSpreadScale(d.orbitProgress, endWidth);
+				const nx = -sample.ty;
+				const ny = sample.tx;
+				const driftAlong = (driftCycle - 0.5) * 26 * scale * direction;
+
+				const baseX =
+					sample.x + nx * d.acrossOffset * spread + sample.tx * driftAlong;
+				const baseY =
+					sample.y + ny * d.acrossOffset * spread + sample.ty * driftAlong;
+
+				stepHoverWake(d, baseX, baseY, 0.18, d.scale, dtSec, stroke);
+
+				const pxX = baseX + d.hx;
+				const pxY = baseY + d.hy;
+				const alpha = clamp(
+					d.opacity * (0.24 + illum * 0.76) * revealAlpha * driftFade,
+					0,
+					0.85,
+				);
+				if (alpha < 0.015) continue;
+
+				const drawSize =
+					(3.4 + d.scale * 2.8 + illum * 2.6) * (0.85 + 0.15 * path.depth);
+				const bank = isGold
+					? d.orbitProgress < 0.22
+						? sprites.blueDust
+						: sprites.goldDust
+					: sprites.blueDust;
+				ctx.globalAlpha = alpha;
+				ctx.drawImage(
+					bank[d.colorIndex],
+					pxX - drawSize * 0.5,
+					pxY - drawSize * 0.5,
+					drawSize,
+					drawSize,
+				);
+			}
+			ctx.restore();
+
+			// Counter-flowing 4-path star streams
+			ctx.save();
+			ctx.globalCompositeOperation = "lighter";
+			const flareQueue: Array<{
+				x: number;
+				y: number;
+				size: number;
+				alpha: number;
+				tint: Rgb;
+			}> = [];
+
+			for (const s of stars) {
+				const path = paths[s.pathIndex];
+				const isGold = path.kind === "gold";
+				const fadeProgress = isGold ? goldFadeProgress : blueFadeProgress;
+				if (fadeProgress <= 0.001) continue;
+
+				const endWidth = isGold ? 1 : blueEndWidth;
+				const cruise = 0.42 + 1.65 * s.layer;
+				const rawPhase = s.orbitProgress + pathOffsets[s.pathIndex] * cruise;
+				const pathPhase = ((rawPhase % 1) + 1) % 1;
+				const progress =
+					pathPhase +
+					(0.08 * Math.sin(pathPhase * Math.PI * 2)) / (Math.PI * 2);
+
+				const distFromSource =
+					path.speed > 0 ? s.orbitProgress : 1 - s.orbitProgress;
+				const twinkleFrac = s.twinklePhase / (Math.PI * 2);
+				const fadeStart = 0.54 * distFromSource + 0.2 * twinkleFrac;
+				const revealAlpha = smoothstep(
+					fadeStart,
+					fadeStart + 0.26,
+					fadeProgress,
+				);
+				const followupAlpha = s.isFollowup
+					? smoothstep(
+							0.2 * twinkleFrac,
+							0.8 + 0.2 * twinkleFrac,
+							followupReveal,
+						)
+					: 1;
+				if (revealAlpha * followupAlpha < 0.01) continue;
+
+				const endpointVis = smoothstep(0, 0.055, progress);
+				const middleWeight = lerp(
+					Math.sin(clamp(progress, 0, 1) * Math.PI),
+					1,
+					smoothstep(0.5, 1, progress),
+				);
+				const sizeEnvelope = lerp(
+					1,
+					0.14 + 0.86 * Math.max(middleWeight, 0) ** 0.68,
+					0.12,
+				);
+
+				const sample = lookupPath(path.samples, progress);
+				const spread = trailSpreadScale(progress, endWidth);
+				const nx = -sample.ty;
+				const ny = sample.tx;
+
+				const belly = Math.sin(progress * Math.PI);
+				const driftAmp = (0.18 + s.layer * 0.38) * belly * 24 * scale;
+				const wave =
+					(isReduced ? 0 : elapsedSec) * (0.28 + s.layer * 0.31) +
+					s.twinklePhase;
+				const waveX = Math.sin(wave + sample.y * 0.006) * driftAmp;
+				const waveY = Math.cos(wave * 0.73 + sample.x * 0.004) * driftAmp;
+
+				const baseX = sample.x + nx * s.acrossOffset * spread + waveX;
+				const baseY = sample.y + ny * s.acrossOffset * spread + waveY;
+
+				const wakeScale = 0.38 / Math.sqrt(Math.max(0.3, s.scale));
+				stepHoverWake(s, baseX, baseY, wakeScale, 2 * s.scale, dtSec, stroke);
+
+				const pxX = baseX + s.hx;
+				const pxY = baseY + s.hy;
+
+				const twinkle =
+					0.86 +
+					0.14 *
+						Math.sin(
+							s.twinklePhase +
+								(isReduced ? 0 : elapsedSec) * TWINKLE_SPEED * s.twinkleRate,
+						);
+
+				const alpha = clamp(
+					s.opacity *
+						revealAlpha *
+						followupAlpha *
+						endpointVis *
+						(0.92 + twinkle * 0.08),
+					0,
+					1,
+				);
+				if (alpha < 0.015) continue;
+
+				const drawSize =
+					(1.6 + s.scale * sizeEnvelope * endpointVis * 3.1) *
+					(0.97 + twinkle * 0.03) *
+					scale;
+
+				const bank = isGold
+					? progress < 0.2
+						? sprites.blueStars
+						: sprites.goldStars
+					: sprites.blueStars;
+
+				ctx.globalAlpha = alpha;
+				ctx.drawImage(
+					bank[s.colorIndex],
+					pxX - drawSize * 0.5,
+					pxY - drawSize * 0.5,
+					drawSize,
+					drawSize,
+				);
+
+				if (s.hasCrossFlare && endpointVis > 0.35) {
+					flareQueue.push({
+						x: pxX,
+						y: pxY,
+						size: (12 + s.brightness * 6.5) * scale,
+						alpha: alpha * 0.82 * twinkle,
+						tint: isGold
+							? progress < 0.25
+								? [190, 224, 255]
+								: [255, 206, 134]
+							: [164, 212, 255],
+					});
+				}
+			}
+			ctx.restore();
+
+			for (const fl of flareQueue) {
+				drawFourPointFlare(
+					ctx,
+					fl.x,
+					fl.y,
+					fl.size,
+					fl.size * 0.14,
+					fl.tint,
+					fl.alpha,
+					fl.size > 20 * scale,
+				);
+			}
+
+			drawPoisedSolOrb(
+				ctx,
+				solPos.x,
+				solPos.y,
+				solRadius,
+				solReveal,
+				isReduced ? 0 : elapsedSec,
+				pointer.solHoverX,
+				pointer.solHoverY,
+				pointer.solHoverZ,
+			);
+
+			if (blueStarReveal > 0.005) {
+				drawFourPointFlare(
+					ctx,
+					astraPos.x,
+					astraPos.y,
+					astraStarSize,
+					9.5 * scale,
+					[148, 204, 244],
+					blueStarReveal,
+					true,
+					pointer.astraHoverX,
+					pointer.astraHoverY,
+					pointer.astraHoverZ,
+				);
+			}
 		};
 
-		resize();
-		const ro = new ResizeObserver(resize);
-		ro.observe(container);
-
-		const clock = new THREE.Clock();
 		let rafId = 0;
-		const animate = () => {
-			rafId = window.requestAnimationFrame(animate);
-			const t = clock.getElapsedTime();
+		let elapsedAccSec = 0;
+		let lastFrameMs = 0;
 
-			starsMaterial.uniforms.uTime.value = t;
-			galaxyMaterial.uniforms.uTime.value = t;
-			galaxy.rotation.y = t * 0.08;
-			galaxy.rotation.z = t * 0.03;
-			stars.rotation.y = t * 0.01;
-
-			for (const p of planets) {
-				p.pivot.rotation.y = t * p.orbitSpeed;
-				p.mesh.rotation.y = t * p.rotationSpeed;
+		const stopLoop = () => {
+			if (rafId) {
+				window.cancelAnimationFrame(rafId);
+				rafId = 0;
 			}
-
-			renderer.render(scene, camera);
 		};
-		animate();
+
+		const tick = (now: number) => {
+			const dtSec =
+				lastFrameMs > 0 ? Math.min(0.05, (now - lastFrameMs) * 0.001) : 1 / 60;
+			lastFrameMs = now;
+			elapsedAccSec += dtSec;
+			renderFrame(elapsedAccSec, dtSec, false);
+			rafId = window.requestAnimationFrame(tick);
+		};
+
+		const syncPlayback = () => {
+			stopLoop();
+			if (reducedMotionQuery.matches) {
+				renderFrame(10, 0, true);
+				return;
+			}
+			if (document.hidden) {
+				return;
+			}
+			lastFrameMs = performance.now();
+			rafId = window.requestAnimationFrame(tick);
+		};
+
+		const handleResize = () => {
+			buildScene();
+			readScroll();
+			renderFrame(
+				reducedMotionQuery.matches ? 10 : elapsedAccSec,
+				0,
+				reducedMotionQuery.matches,
+			);
+		};
+
+		const handlePointerMove = (e: PointerEvent) => {
+			if (reducedMotionQuery.matches) return;
+			const rect = container.getBoundingClientRect();
+			const nx = e.clientX - rect.left;
+			const ny = e.clientY - rect.top;
+			if (!pointer.active) {
+				pointer.prevX = nx;
+				pointer.prevY = ny;
+			}
+			pointer.dx += nx - pointer.prevX;
+			pointer.dy += ny - pointer.prevY;
+			pointer.prevX = nx;
+			pointer.prevY = ny;
+			pointer.x = nx;
+			pointer.y = ny;
+			pointer.active = e.pointerType === "mouse" && e.buttons === 0;
+		};
+
+		const handlePointerLeave = () => {
+			pointer.active = false;
+		};
+
+		buildScene();
+		readScroll();
+		syncPlayback();
+
+		const ro = new ResizeObserver(handleResize);
+		ro.observe(container);
+		reducedMotionQuery.addEventListener("change", syncPlayback);
+		document.addEventListener("visibilitychange", syncPlayback);
+		window.addEventListener("pointermove", handlePointerMove, {
+			passive: true,
+		});
+		window.addEventListener("pointerleave", handlePointerLeave);
+		window.addEventListener("scroll", readScroll, { passive: true });
 
 		return () => {
-			window.cancelAnimationFrame(rafId);
+			stopLoop();
 			ro.disconnect();
-
-			for (const p of planets) {
-				p.mesh.geometry.dispose();
-				(p.mesh.material as THREE.Material).dispose();
-			}
-			if (saturnRing) {
-				saturnRing.geometry.dispose();
-				(saturnRing.material as THREE.Material).dispose();
-				const tex = (saturnRing.material as THREE.MeshBasicMaterial).map;
-				tex?.dispose();
-			}
-			if (atmosphere) {
-				atmosphere.geometry.dispose();
-				(atmosphere.material as THREE.Material).dispose();
-			}
-
-			starsGeometry.dispose();
-			starsMaterial.dispose();
-			galaxyGeometry.dispose();
-			galaxyMaterial.dispose();
-			earthMap.dispose();
-			marsMap.dispose();
-			jupiterMap.dispose();
-			mercuryMap.dispose();
-			venusMap.dispose();
-			saturnMap.dispose();
-			uranusMap.dispose();
-			neptuneMap.dispose();
-			renderer.dispose();
-
-			// Remove canvas
-			if (renderer.domElement.parentElement === container) {
-				container.removeChild(renderer.domElement);
-			}
+			reducedMotionQuery.removeEventListener("change", syncPlayback);
+			document.removeEventListener("visibilitychange", syncPlayback);
+			window.removeEventListener("pointermove", handlePointerMove);
+			window.removeEventListener("pointerleave", handlePointerLeave);
+			window.removeEventListener("scroll", readScroll);
 		};
 	}, []);
 
 	return (
 		<div
 			ref={containerRef}
-			className="pointer-events-none absolute inset-0 z-0"
+			className="pointer-events-none fixed inset-0 z-0 overflow-hidden"
 			aria-hidden="true"
-		/>
+		>
+			<canvas ref={canvasRef} className="block h-full w-full" />
+		</div>
 	);
 }
