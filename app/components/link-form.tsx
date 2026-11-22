@@ -27,17 +27,17 @@ export function LinkForm() {
 			<button
 				type="button"
 				onClick={() => setIsOpen(true)}
-				className="fixed bottom-6 right-6 w-14 h-14 rounded-full shadow-lg flex items-center justify-center text-3xl font-light text-[#eef5ff] hover:scale-110 transition-all duration-200 z-50"
+				className="fixed bottom-6 right-6 w-14 h-14 rounded-full shadow-lg flex items-center justify-center text-3xl font-light text-[#f5f7fa] hover:scale-110 transition-all duration-200 z-50"
 				aria-label="リンクを追加"
 				style={{
 					fontSize: "1.875rem",
 					lineHeight: 1,
-					backgroundColor: "rgba(22, 36, 68, 0.55)",
-					border: "1px solid rgba(210, 230, 255, 0.34)",
-					backdropFilter: "blur(16px) saturate(160%)",
-					WebkitBackdropFilter: "blur(16px) saturate(160%)",
+					backgroundColor: "rgba(24, 26, 32, 0.68)",
+					border: "1px solid rgba(255, 255, 255, 0.24)",
+					backdropFilter: "blur(16px) saturate(155%)",
+					WebkitBackdropFilter: "blur(16px) saturate(155%)",
 					boxShadow:
-						"0 8px 28px rgba(3, 8, 24, 0.58), inset 0 1px 0 rgba(255, 255, 255, 0.16)",
+						"0 8px 28px rgba(0, 0, 0, 0.72), inset 0 1px 0 rgba(255, 255, 255, 0.16)",
 				}}
 			>
 				+
