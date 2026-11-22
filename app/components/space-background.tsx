@@ -5,16 +5,38 @@ import { useEffect, useRef } from "react";
 type Point = { x: number; y: number };
 type Rgb = [number, number, number];
 
-type FlareSpec = {
-	t: number;
-	off: number;
+type RibbonGeometry = {
+	p0: Point;
+	p1: Point;
+	p2: Point;
+	p3: Point;
+};
+
+type RibbonParticle = {
+	ribbon: "sol" | "astra";
+	layer: "bokeh" | "mid" | "spark";
+	tBase: number;
+	tSpeed: number;
+	normalBase: number;
+	waveAmp: number;
+	waveFreq: number;
+	wavePhase: number;
 	size: number;
-	alpha: number;
+	baseAlpha: number;
+	twinklePhase: number;
+	twinkleSpeed: number;
+	hot: boolean;
+};
+
+type FlowingFlare = {
+	ribbon: "sol" | "astra";
+	tBase: number;
+	tSpeed: number;
+	normalFactor: number;
+	size: number;
+	baseAlpha: number;
 	phase: number;
-	speed: number;
-	tint: Rgb;
-	x: number;
-	y: number;
+	twinkleSpeed: number;
 	includeDiagonal: boolean;
 };
 
@@ -25,26 +47,18 @@ type TwinkleStar = {
 	baseAlpha: number;
 	phase: number;
 	speed: number;
+	driftX: number;
+	driftY: number;
 	warm: boolean;
 };
 
-type DriftSparkle = {
-	ribbon: "sol" | "astra";
-	tBase: number;
-	tSpeed: number;
-	normalFactor: number;
-	r: number;
-	baseAlpha: number;
-	phase: number;
-	twinkleSpeed: number;
-	hot: boolean;
-};
-
-type RibbonGeometry = {
-	p0: Point;
-	p1: Point;
-	p2: Point;
-	p3: Point;
+type SpriteSet = {
+	coolBokeh: HTMLCanvasElement;
+	midGoldBokeh: HTMLCanvasElement;
+	warmBokeh: HTMLCanvasElement;
+	coolBead: HTMLCanvasElement;
+	warmBead: HTMLCanvasElement;
+	hotWhite: HTMLCanvasElement;
 };
 
 function mulberry32(seed: number) {
@@ -108,6 +122,63 @@ function bezierTangent(g: RibbonGeometry, t: number): Point {
 	return { x: dx / len, y: dy / len };
 }
 
+function createRadialSprite(
+	size: number,
+	stops: Array<[number, string]>,
+): HTMLCanvasElement {
+	const c = document.createElement("canvas");
+	c.width = size;
+	c.height = size;
+	const sctx = c.getContext("2d");
+	if (!sctx) return c;
+	const half = size / 2;
+	const grad = sctx.createRadialGradient(half, half, 0, half, half, half);
+	for (const [offset, color] of stops) {
+		grad.addColorStop(offset, color);
+	}
+	sctx.fillStyle = grad;
+	sctx.fillRect(0, 0, size, size);
+	return c;
+}
+
+function buildSprites(): SpriteSet {
+	return {
+		coolBokeh: createRadialSprite(48, [
+			[0, "rgba(86, 136, 206, 0.95)"],
+			[0.65, "rgba(64, 108, 174, 0.62)"],
+			[1, "rgba(64, 108, 174, 0)"],
+		]),
+		midGoldBokeh: createRadialSprite(48, [
+			[0, "rgba(182, 146, 108, 0.92)"],
+			[0.65, "rgba(148, 114, 78, 0.56)"],
+			[1, "rgba(148, 114, 78, 0)"],
+		]),
+		warmBokeh: createRadialSprite(48, [
+			[0, "rgba(206, 146, 84, 0.95)"],
+			[0.65, "rgba(174, 118, 64, 0.60)"],
+			[1, "rgba(174, 118, 64, 0)"],
+		]),
+		coolBead: createRadialSprite(32, [
+			[0, "rgba(255, 255, 255, 1)"],
+			[0.32, "rgba(186, 224, 255, 0.92)"],
+			[0.68, "rgba(104, 166, 238, 0.36)"],
+			[1, "rgba(104, 166, 238, 0)"],
+		]),
+		warmBead: createRadialSprite(32, [
+			[0, "rgba(255, 252, 244, 1)"],
+			[0.34, "rgba(255, 218, 158, 0.92)"],
+			[0.68, "rgba(232, 164, 92, 0.36)"],
+			[1, "rgba(232, 164, 92, 0)"],
+		]),
+		hotWhite: createRadialSprite(32, [
+			[0, "rgba(255, 255, 255, 1)"],
+			[0.42, "rgba(245, 250, 255, 0.88)"],
+			[0.76, "rgba(210, 230, 255, 0.24)"],
+			[1, "rgba(210, 230, 255, 0)"],
+		]),
+	};
+}
+
 function drawFourPointStar(
 	ctx: CanvasRenderingContext2D,
 	x: number,
@@ -117,24 +188,26 @@ function drawFourPointStar(
 	tint: Rgb,
 	alpha: number,
 	includeDiagonal: boolean,
+	diagonalRotation = 0,
 ) {
+	if (alpha < 0.02 || size < 1) return;
 	ctx.save();
 	ctx.globalCompositeOperation = "lighter";
 
-	const aura = ctx.createRadialGradient(x, y, 0, x, y, size * 0.42);
-	aura.addColorStop(0, `rgba(255,255,255,${0.92 * alpha})`);
+	const aura = ctx.createRadialGradient(x, y, 0, x, y, size * 0.44);
+	aura.addColorStop(0, `rgba(255,255,255,${0.94 * alpha})`);
 	aura.addColorStop(
 		0.2,
-		`rgba(${tint[0]},${tint[1]},${tint[2]},${0.5 * alpha})`,
+		`rgba(${tint[0]},${tint[1]},${tint[2]},${0.54 * alpha})`,
 	);
 	aura.addColorStop(
-		0.55,
-		`rgba(${tint[0]},${tint[1]},${tint[2]},${0.11 * alpha})`,
+		0.56,
+		`rgba(${tint[0]},${tint[1]},${tint[2]},${0.13 * alpha})`,
 	);
 	aura.addColorStop(1, "rgba(0,0,0,0)");
 	ctx.fillStyle = aura;
 	ctx.beginPath();
-	ctx.arc(x, y, size * 0.42, 0, Math.PI * 2);
+	ctx.arc(x, y, size * 0.44, 0, Math.PI * 2);
 	ctx.fill();
 
 	const drawSpike = (
@@ -150,12 +223,12 @@ function drawFourPointStar(
 		grad.addColorStop(0, "rgba(255,255,255,0)");
 		grad.addColorStop(
 			0.3,
-			`rgba(${tint[0]},${tint[1]},${tint[2]},${0.32 * op})`,
+			`rgba(${tint[0]},${tint[1]},${tint[2]},${0.35 * op})`,
 		);
 		grad.addColorStop(0.5, `rgba(255,255,255,${0.98 * op})`);
 		grad.addColorStop(
 			0.7,
-			`rgba(${tint[0]},${tint[1]},${tint[2]},${0.32 * op})`,
+			`rgba(${tint[0]},${tint[1]},${tint[2]},${0.35 * op})`,
 		);
 		grad.addColorStop(1, "rgba(255,255,255,0)");
 		ctx.fillStyle = grad;
@@ -167,27 +240,27 @@ function drawFourPointStar(
 		ctx.restore();
 	};
 
-	drawSpike(0, size, Math.max(0.7, size * 0.026), alpha);
-	drawSpike(Math.PI / 2, size * 0.96, Math.max(0.7, size * 0.026), alpha);
+	drawSpike(0, size, Math.max(0.75, size * 0.027), alpha);
+	drawSpike(Math.PI / 2, size * 0.96, Math.max(0.75, size * 0.027), alpha);
 
 	if (includeDiagonal) {
 		drawSpike(
-			Math.PI / 4,
-			size * 0.24,
-			Math.max(0.5, size * 0.018),
-			alpha * 0.48,
+			Math.PI / 4 + diagonalRotation,
+			size * 0.28,
+			Math.max(0.55, size * 0.02),
+			alpha * 0.56,
 		);
 		drawSpike(
-			-Math.PI / 4,
-			size * 0.24,
-			Math.max(0.5, size * 0.018),
-			alpha * 0.48,
+			-Math.PI / 4 + diagonalRotation,
+			size * 0.28,
+			Math.max(0.55, size * 0.02),
+			alpha * 0.56,
 		);
 	}
 
 	const core = ctx.createRadialGradient(x, y, 0, x, y, coreRadius);
 	core.addColorStop(0, `rgba(255,255,255,${alpha})`);
-	core.addColorStop(0.55, `rgba(255,255,255,${0.86 * alpha})`);
+	core.addColorStop(0.55, `rgba(255,255,255,${0.88 * alpha})`);
 	core.addColorStop(1, "rgba(255,255,255,0)");
 	ctx.fillStyle = core;
 	ctx.beginPath();
@@ -203,26 +276,27 @@ function drawSolOrb(
 	y: number,
 	radius: number,
 	pulse: number,
+	shimmer: number,
 ) {
 	ctx.save();
 	ctx.globalCompositeOperation = "screen";
 
-	const outerR = radius * (4.2 + pulse * 0.16);
-	const halo3 = ctx.createRadialGradient(x, y, radius * 0.65, x, y, outerR);
-	halo3.addColorStop(0, `rgba(255, 206, 134, ${0.62 + pulse * 0.04})`);
-	halo3.addColorStop(0.26, `rgba(222, 146, 78, ${0.34 + pulse * 0.03})`);
-	halo3.addColorStop(0.56, "rgba(128, 70, 38, 0.12)");
+	const outerR = radius * (3.85 + pulse * 0.85);
+	const halo3 = ctx.createRadialGradient(x, y, radius * 0.6, x, y, outerR);
+	halo3.addColorStop(0, `rgba(255, 208, 136, ${0.56 + pulse * 0.18})`);
+	halo3.addColorStop(0.26, `rgba(226, 150, 80, ${0.3 + pulse * 0.14})`);
+	halo3.addColorStop(0.58, `rgba(132, 74, 42, ${0.1 + pulse * 0.06})`);
 	halo3.addColorStop(1, "rgba(0, 0, 0, 0)");
 	ctx.fillStyle = halo3;
 	ctx.beginPath();
 	ctx.arc(x, y, outerR, 0, Math.PI * 2);
 	ctx.fill();
 
-	const midR = radius * (1.85 + pulse * 0.06);
-	const halo2 = ctx.createRadialGradient(x, y, radius * 0.84, x, y, midR);
-	halo2.addColorStop(0, "rgba(255, 246, 226, 0.96)");
-	halo2.addColorStop(0.32, "rgba(255, 206, 138, 0.78)");
-	halo2.addColorStop(0.68, "rgba(218, 142, 74, 0.26)");
+	const midR = radius * (1.72 + pulse * 0.34);
+	const halo2 = ctx.createRadialGradient(x, y, radius * 0.8, x, y, midR);
+	halo2.addColorStop(0, "rgba(255, 248, 230, 0.98)");
+	halo2.addColorStop(0.32, `rgba(255, 208, 140, ${0.72 + shimmer * 0.18})`);
+	halo2.addColorStop(0.68, `rgba(220, 144, 74, ${0.22 + pulse * 0.14})`);
 	halo2.addColorStop(1, "rgba(0, 0, 0, 0)");
 	ctx.fillStyle = halo2;
 	ctx.beginPath();
@@ -230,6 +304,7 @@ function drawSolOrb(
 	ctx.fill();
 	ctx.restore();
 
+	const discR = radius * (1.03 + pulse * 0.035);
 	ctx.save();
 	const disc = ctx.createRadialGradient(
 		x - radius * 0.1,
@@ -237,15 +312,15 @@ function drawSolOrb(
 		0,
 		x,
 		y,
-		radius * 1.05,
+		discR,
 	);
 	disc.addColorStop(0, "#ffffff");
-	disc.addColorStop(0.76, "#fffbf2");
+	disc.addColorStop(0.75, "#fffbf2");
 	disc.addColorStop(0.92, "#ffe0ab");
 	disc.addColorStop(1, "rgba(255, 198, 124, 0)");
 	ctx.fillStyle = disc;
 	ctx.beginPath();
-	ctx.arc(x, y, radius * 1.05, 0, Math.PI * 2);
+	ctx.arc(x, y, discR, 0, Math.PI * 2);
 	ctx.fill();
 	ctx.restore();
 }
@@ -270,6 +345,8 @@ export function SpaceBackground() {
 		const staticCtx = staticCanvas.getContext("2d", { alpha: false });
 		if (!staticCtx) return;
 
+		const sprites = buildSprites();
+
 		let width = 1;
 		let height = 1;
 		let dpr = 1;
@@ -287,10 +364,20 @@ export function SpaceBackground() {
 			p3: { x: 0, y: 0 },
 		};
 		let solRadius = 38;
-		let astraStarSize = 100;
+		let astraStarSize = 102;
 		let stars: TwinkleStar[] = [];
-		let flares: FlareSpec[] = [];
-		let driftSparkles: DriftSparkle[] = [];
+		let particles: RibbonParticle[] = [];
+		let flares: FlowingFlare[] = [];
+
+		// Pointer attraction/repulsion state inspired by the OpenAI Astra/Sol hero
+		const pointer = {
+			active: false,
+			x: 0,
+			y: 0,
+			smoothX: 0,
+			smoothY: 0,
+			strength: 0,
+		};
 
 		const solWidth = (t: number) => {
 			const belly = Math.sin(t ** 0.78 * Math.PI);
@@ -298,27 +385,6 @@ export function SpaceBackground() {
 		};
 
 		const astraWidth = (t: number) => (5 + t ** 0.85 * 45) * scale;
-
-		const solColor = (t: number, kind: "bokeh" | "mid" | "hot"): Rgb => {
-			const warmMix = Math.max(0, Math.min(1, (t - 0.1) / 0.7));
-			if (kind === "bokeh") {
-				return lerpColor([58, 94, 142], [174, 118, 64], warmMix);
-			}
-			if (kind === "hot") {
-				return lerpColor([232, 244, 255], [255, 244, 214], warmMix);
-			}
-			return lerpColor([154, 194, 236], [246, 198, 134], warmMix);
-		};
-
-		const astraColor = (t: number, kind: "bokeh" | "mid" | "hot"): Rgb => {
-			if (kind === "bokeh") {
-				return lerpColor([72, 118, 178], [46, 82, 138], t);
-			}
-			if (kind === "hot") {
-				return lerpColor([248, 252, 255], [218, 238, 255], t);
-			}
-			return lerpColor([198, 228, 255], [116, 168, 232], t);
-		};
 
 		const buildScene = () => {
 			width = Math.max(1, container.clientWidth);
@@ -370,7 +436,7 @@ export function SpaceBackground() {
 			solRadius = 38 * scale;
 			astraStarSize = 102 * scale;
 
-			// 1. Deep midnight navy sky gradient
+			// 1. Static midnight navy backdrop + subtle blooms + blurred spine glows
 			const bgGrad = staticCtx.createLinearGradient(0, 0, 0, height);
 			bgGrad.addColorStop(0, "#0c1427");
 			bgGrad.addColorStop(0.38, "#070b1b");
@@ -392,7 +458,6 @@ export function SpaceBackground() {
 			staticCtx.fillStyle = centerVignette;
 			staticCtx.fillRect(0, 0, width, height);
 
-			// 2. Atmospheric color blooms
 			staticCtx.save();
 			staticCtx.globalCompositeOperation = "screen";
 			const solAmb = staticCtx.createRadialGradient(
@@ -403,9 +468,9 @@ export function SpaceBackground() {
 				solGeometry.p3.y,
 				width * 0.24,
 			);
-			solAmb.addColorStop(0, "rgba(255, 206, 138, 0.42)");
-			solAmb.addColorStop(0.24, "rgba(216, 146, 82, 0.2)");
-			solAmb.addColorStop(0.58, "rgba(112, 68, 42, 0.07)");
+			solAmb.addColorStop(0, "rgba(255, 206, 138, 0.36)");
+			solAmb.addColorStop(0.24, "rgba(216, 146, 82, 0.17)");
+			solAmb.addColorStop(0.58, "rgba(112, 68, 42, 0.06)");
 			solAmb.addColorStop(1, "rgba(0, 0, 0, 0)");
 			staticCtx.fillStyle = solAmb;
 			staticCtx.fillRect(0, 0, width, height);
@@ -418,14 +483,13 @@ export function SpaceBackground() {
 				height * 0.86,
 				width * 0.36,
 			);
-			astraAmb.addColorStop(0, "rgba(88, 148, 228, 0.17)");
+			astraAmb.addColorStop(0, "rgba(88, 148, 228, 0.16)");
 			astraAmb.addColorStop(0.45, "rgba(40, 82, 150, 0.08)");
 			astraAmb.addColorStop(1, "rgba(0, 0, 0, 0)");
 			staticCtx.fillStyle = astraAmb;
 			staticCtx.fillRect(0, 0, width, height);
 			staticCtx.restore();
 
-			// 3. Soft ribbon spine underlays
 			const drawRibbonGlow = (
 				g: RibbonGeometry,
 				startColor: string,
@@ -470,296 +534,379 @@ export function SpaceBackground() {
 				41 * scale,
 			);
 
-			// 4. Static bokeh & dense base stardust ribbons
-			const bakeRibbonParticles = (
-				g: RibbonGeometry,
-				count: number,
-				widthFn: (t: number) => number,
-				colorFn: (t: number, kind: "bokeh" | "mid" | "hot") => Rgb,
-			) => {
-				// Bokeh discs
-				for (let i = 0; i < Math.floor(count * 0.45); i++) {
-					const t = rand();
-					const pt = bezierPoint(g, t);
-					const tan = bezierTangent(g, t);
-					const nx = -tan.y;
-					const ny = tan.x;
-					const w = widthFn(t);
-					const offset = gaussianRandom(rand) * w * 0.56;
-					const x = pt.x + nx * offset;
-					const y = pt.y + ny * offset;
-					const distNorm = Math.min(1, Math.abs(offset) / (w * 1.15));
-					const r = (1.4 + rand() * 3.75) * scale * (1 - distNorm * 0.35);
-					const c = colorFn(t, "bokeh");
-					const alpha = (0.16 + rand() * 0.3) * (1 - distNorm * 0.62);
-
-					const grad = staticCtx.createRadialGradient(x, y, 0, x, y, r);
-					grad.addColorStop(0, `rgba(${c[0]},${c[1]},${c[2]},${alpha})`);
-					grad.addColorStop(
-						0.75,
-						`rgba(${c[0]},${c[1]},${c[2]},${alpha * 0.6})`,
-					);
-					grad.addColorStop(1, `rgba(${c[0]},${c[1]},${c[2]},0)`);
-					staticCtx.fillStyle = grad;
-					staticCtx.beginPath();
-					staticCtx.arc(x, y, r, 0, Math.PI * 2);
-					staticCtx.fill();
-				}
-
-				// Crisp stardust beads
-				staticCtx.save();
-				staticCtx.globalCompositeOperation = "lighter";
-				for (let i = 0; i < count; i++) {
-					const t = rand();
-					const pt = bezierPoint(g, t);
-					const tan = bezierTangent(g, t);
-					const nx = -tan.y;
-					const ny = tan.x;
-					const w = widthFn(t);
-					const spread =
-						gaussianRandom(rand) * w * (rand() < 0.72 ? 0.36 : 0.74);
-					const x = pt.x + nx * spread;
-					const y = pt.y + ny * spread;
-					const distNorm = Math.min(1, Math.abs(spread) / (w * 1.1));
-
-					const sizeRoll = rand();
-					let r: number;
-					if (sizeRoll < 0.6) r = (0.45 + rand() * 0.95) * scale;
-					else if (sizeRoll < 0.91) r = (1.1 + rand() * 1.45) * scale;
-					else r = (2.1 + rand() * 1.55) * scale;
-
-					const c = colorFn(t, sizeRoll > 0.78 ? "hot" : "mid");
-					const alpha = (0.28 + rand() * 0.66) * (1 - distNorm * 0.56);
-
-					if (r > 1.6 * scale) {
-						const grad = staticCtx.createRadialGradient(
-							x,
-							y,
-							0,
-							x,
-							y,
-							r * 1.45,
-						);
-						grad.addColorStop(
-							0,
-							`rgba(255,255,255,${Math.min(1, alpha * 1.05)})`,
-						);
-						grad.addColorStop(
-							0.38,
-							`rgba(${c[0]},${c[1]},${c[2]},${alpha * 0.85})`,
-						);
-						grad.addColorStop(1, `rgba(${c[0]},${c[1]},${c[2]},0)`);
-						staticCtx.fillStyle = grad;
-						staticCtx.beginPath();
-						staticCtx.arc(x, y, r * 1.45, 0, Math.PI * 2);
-						staticCtx.fill();
-					} else {
-						staticCtx.fillStyle = `rgba(${c[0]},${c[1]},${c[2]},${alpha})`;
-						staticCtx.beginPath();
-						staticCtx.arc(x, y, r, 0, Math.PI * 2);
-						staticCtx.fill();
-					}
-				}
-				staticCtx.restore();
-			};
-
-			const densityScale = isCompact ? 0.65 : 1;
-			bakeRibbonParticles(
-				solGeometry,
-				Math.round(1750 * densityScale),
-				solWidth,
-				solColor,
-			);
-			bakeRibbonParticles(
-				astraGeometry,
-				Math.round(1550 * densityScale),
-				astraWidth,
-				astraColor,
-			);
-
-			// 5. Prepare animated distant stars
+			// 2. Distant twinkling background stars (with subtle slow drift)
 			stars = [];
-			for (let i = 0; i < 70; i++) {
+			for (let i = 0; i < 80; i++) {
 				stars.push({
 					x: rand() * width,
 					y: rand() * height,
-					r: (0.45 + rand() * 0.8) * scale,
-					baseAlpha: 0.16 + rand() * 0.42,
+					r: (0.55 + rand() * 0.95) * scale,
+					baseAlpha: 0.22 + rand() * 0.55,
 					phase: rand() * Math.PI * 2,
-					speed: 0.45 + rand() * 0.9,
+					speed: 1.0 + rand() * 2.0,
+					driftX: (rand() - 0.5) * 2.4,
+					driftY: (rand() - 0.5) * 1.8,
 					warm: rand() > 0.72,
 				});
 			}
 
-			// 6. Prepare animated 4-point specular glints along both arcs
-			const solFlares: Array<{
-				t: number;
-				off: number;
-				size: number;
-				alpha: number;
-			}> = [
-				{ t: 0.05, off: 0.08, size: 21, alpha: 0.88 },
-				{ t: 0.14, off: -0.14, size: 16, alpha: 0.82 },
-				{ t: 0.24, off: 0.08, size: 23, alpha: 0.92 },
-				{ t: 0.36, off: -0.05, size: 18, alpha: 0.86 },
-				{ t: 0.48, off: 0.1, size: 27, alpha: 0.96 },
-				{ t: 0.6, off: -0.1, size: 19, alpha: 0.88 },
-				{ t: 0.72, off: 0.06, size: 25, alpha: 0.95 },
-				{ t: 0.82, off: -0.04, size: 22, alpha: 0.94 },
-				{ t: 0.91, off: 0.02, size: 28, alpha: 0.98 },
-			];
+			// 3. Live layered streaming stardust particles along both trajectories
+			particles = [];
+			const density = isCompact ? 0.62 : 1;
 
-			const astraFlares: Array<{
-				t: number;
-				off: number;
-				size: number;
-				alpha: number;
-			}> = [
-				{ t: 0.14, off: -0.1, size: 14, alpha: 0.8 },
-				{ t: 0.28, off: 0.08, size: 23, alpha: 0.92 },
-				{ t: 0.42, off: -0.12, size: 18, alpha: 0.86 },
-				{ t: 0.56, off: 0.14, size: 28, alpha: 0.96 },
-				{ t: 0.71, off: -0.08, size: 19, alpha: 0.88 },
-				{ t: 0.83, off: 0.06, size: 30, alpha: 0.96 },
-				{ t: 0.93, off: -0.05, size: 24, alpha: 0.94 },
-			];
+			const addRibbonParticles = (
+				ribbon: "sol" | "astra",
+				bokehCount: number,
+				midCount: number,
+				sparkCount: number,
+			) => {
+				// Far/deep bokeh layer (stately visible glide)
+				for (let i = 0; i < bokehCount; i++) {
+					particles.push({
+						ribbon,
+						layer: "bokeh",
+						tBase: rand(),
+						tSpeed: 0.022 + rand() * 0.024,
+						normalBase: gaussianRandom(rand) * 0.58,
+						waveAmp: (0.04 + rand() * 0.08) * (rand() < 0.5 ? 1 : -1),
+						waveFreq: 5 + rand() * 4,
+						wavePhase: rand() * Math.PI * 2,
+						size: (3.6 + rand() * 7.2) * scale,
+						baseAlpha: 0.18 + rand() * 0.28,
+						twinklePhase: rand() * Math.PI * 2,
+						twinkleSpeed: 0.9 + rand() * 1.3,
+						hot: false,
+					});
+				}
 
+				// Mid stardust beads (fluid continuous stream)
+				for (let i = 0; i < midCount; i++) {
+					particles.push({
+						ribbon,
+						layer: "mid",
+						tBase: rand(),
+						tSpeed: 0.045 + rand() * 0.055,
+						normalBase: gaussianRandom(rand) * (rand() < 0.72 ? 0.36 : 0.72),
+						waveAmp: (0.05 + rand() * 0.11) * (rand() < 0.5 ? 1 : -1),
+						waveFreq: 6 + rand() * 5,
+						wavePhase: rand() * Math.PI * 2,
+						size: (2.6 + rand() * 4.2) * scale,
+						baseAlpha: 0.34 + rand() * 0.58,
+						twinklePhase: rand() * Math.PI * 2,
+						twinkleSpeed: 1.6 + rand() * 2.4,
+						hot: rand() > 0.72,
+					});
+				}
+
+				// Near bright sparks (energetic luminous stream)
+				for (let i = 0; i < sparkCount; i++) {
+					particles.push({
+						ribbon,
+						layer: "spark",
+						tBase: rand(),
+						tSpeed: 0.085 + rand() * 0.075,
+						normalBase: gaussianRandom(rand) * 0.32,
+						waveAmp: (0.06 + rand() * 0.12) * (rand() < 0.5 ? 1 : -1),
+						waveFreq: 7 + rand() * 5,
+						wavePhase: rand() * Math.PI * 2,
+						size: (5.2 + rand() * 5.4) * scale,
+						baseAlpha: 0.55 + rand() * 0.45,
+						twinklePhase: rand() * Math.PI * 2,
+						twinkleSpeed: 2.2 + rand() * 2.8,
+						hot: rand() > 0.35,
+					});
+				}
+			};
+
+			addRibbonParticles(
+				"sol",
+				Math.round(230 * density),
+				Math.round(520 * density),
+				Math.round(95 * density),
+			);
+			addRibbonParticles(
+				"astra",
+				Math.round(210 * density),
+				Math.round(470 * density),
+				Math.round(90 * density),
+			);
+
+			// 4. Flowing 4-point specular flares riding smoothly along both arcs
 			flares = [];
-			for (const fp of solFlares) {
-				const pt = bezierPoint(solGeometry, fp.t);
-				const tan = bezierTangent(solGeometry, fp.t);
-				const w = solWidth(fp.t);
+			const solFlareCount = isCompact ? 7 : 10;
+			for (let i = 0; i < solFlareCount; i++) {
+				const baseSize = (15 + rand() * 14) * scale;
 				flares.push({
-					...fp,
-					size: fp.size * scale,
-					x: pt.x - tan.y * (fp.off * w),
-					y: pt.y + tan.x * (fp.off * w),
+					ribbon: "sol",
+					tBase: (i + rand() * 0.45) / solFlareCount,
+					tSpeed: 0.055 + rand() * 0.04,
+					normalFactor: (rand() - 0.5) * 0.28,
+					size: baseSize,
+					baseAlpha: 0.78 + rand() * 0.22,
 					phase: rand() * Math.PI * 2,
-					speed: 0.65 + rand() * 0.7,
-					tint: lerpColor(
-						[195, 224, 255],
-						[255, 206, 132],
-						Math.min(1, fp.t * 1.2),
-					),
-					includeDiagonal: fp.size > 20,
+					twinkleSpeed: 2.0 + rand() * 1.8,
+					includeDiagonal: baseSize > 20 * scale,
 				});
 			}
 
-			for (const fp of astraFlares) {
-				const pt = bezierPoint(astraGeometry, fp.t);
-				const tan = bezierTangent(astraGeometry, fp.t);
-				const w = astraWidth(fp.t);
+			const astraFlareCount = isCompact ? 6 : 9;
+			for (let i = 0; i < astraFlareCount; i++) {
+				const baseSize = (15 + rand() * 16) * scale;
 				flares.push({
-					...fp,
-					size: fp.size * scale,
-					x: pt.x - tan.y * (fp.off * w),
-					y: pt.y + tan.x * (fp.off * w),
+					ribbon: "astra",
+					tBase: (i + rand() * 0.45) / astraFlareCount,
+					tSpeed: 0.055 + rand() * 0.04,
+					normalFactor: (rand() - 0.5) * 0.3,
+					size: baseSize,
+					baseAlpha: 0.78 + rand() * 0.22,
 					phase: rand() * Math.PI * 2,
-					speed: 0.65 + rand() * 0.7,
-					tint: [166, 212, 255],
-					includeDiagonal: fp.size > 20,
-				});
-			}
-
-			// 7. Prepare subtle drifting sparkles along both curves
-			driftSparkles = [];
-			const sparkleCount = isCompact ? 110 : 180;
-			for (let i = 0; i < sparkleCount; i++) {
-				const ribbon = i % 2 === 0 ? "sol" : "astra";
-				driftSparkles.push({
-					ribbon,
-					tBase: rand(),
-					tSpeed: (0.004 + rand() * 0.008) * (ribbon === "sol" ? 1 : 1),
-					normalFactor: gaussianRandom(rand) * 0.42,
-					r: (0.8 + rand() * 1.35) * scale,
-					baseAlpha: 0.35 + rand() * 0.55,
-					phase: rand() * Math.PI * 2,
-					twinkleSpeed: 0.8 + rand() * 1.4,
-					hot: rand() > 0.45,
+					twinkleSpeed: 2.0 + rand() * 1.8,
+					includeDiagonal: baseSize > 20 * scale,
 				});
 			}
 		};
 
+		const applyPointerField = (x: number, y: number, radiusPx: number) => {
+			if (pointer.strength <= 0.01) return { x, y };
+			const dx = x - pointer.smoothX;
+			const dy = y - pointer.smoothY;
+			const distSq = dx * dx + dy * dy;
+			const maxDistSq = radiusPx * radiusPx;
+			if (distSq >= maxDistSq || distSq < 0.001) return { x, y };
+
+			const dist = Math.sqrt(distSq);
+			const norm = 1 - dist / radiusPx;
+			const nx = dx / dist;
+			const ny = dy / dist;
+
+			// Inner soft repulsion + outer subtle attraction & orbital swirl
+			const radialForce =
+				(dist < radiusPx * 0.48 ? norm * 24 : -norm * 10) * pointer.strength;
+			const swirlForce = norm * norm * 14 * pointer.strength;
+
+			return {
+				x: x + nx * radialForce - ny * swirlForce,
+				y: y + ny * radialForce + nx * swirlForce,
+			};
+		};
+
 		const renderFrame = (elapsedSec: number) => {
+			// Smooth pointer inertia
+			if (pointer.active) {
+				pointer.smoothX += (pointer.x - pointer.smoothX) * 0.12;
+				pointer.smoothY += (pointer.y - pointer.smoothY) * 0.12;
+				pointer.strength += (1 - pointer.strength) * 0.1;
+			} else {
+				pointer.strength *= 0.92;
+			}
+
 			ctx.setTransform(1, 0, 0, 1, 0, 0);
 			ctx.drawImage(staticCanvas, 0, 0);
 			ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
 
-			// Subtle twinkling distant stars
+			// 1. Twinkling background starfield with gentle slow drift
 			for (const s of stars) {
-				const tw = 0.78 + 0.22 * Math.sin(elapsedSec * s.speed + s.phase);
+				const sx = (s.x + elapsedSec * s.driftX + width) % width;
+				const sy = (s.y + elapsedSec * s.driftY + height) % height;
+				const tw =
+					0.35 + 0.65 * (0.5 + 0.5 * Math.sin(elapsedSec * s.speed + s.phase));
 				const alpha = s.baseAlpha * tw;
 				ctx.fillStyle = s.warm
 					? `rgba(255, 238, 210, ${alpha})`
 					: `rgba(210, 228, 255, ${alpha})`;
 				ctx.beginPath();
-				ctx.arc(s.x, s.y, s.r, 0, Math.PI * 2);
+				ctx.arc(sx, sy, s.r, 0, Math.PI * 2);
 				ctx.fill();
 			}
 
-			// Gently drifting stardust sparkles along each trajectory
+			const pointerRadius = 180 * scale;
+
+			// 2. Bokeh layer (normal blending for photographic depth)
 			ctx.save();
-			ctx.globalCompositeOperation = "lighter";
-			for (const sp of driftSparkles) {
-				const t = (sp.tBase + elapsedSec * sp.tSpeed) % 1;
-				const g = sp.ribbon === "sol" ? solGeometry : astraGeometry;
-				const w = sp.ribbon === "sol" ? solWidth(t) : astraWidth(t);
+			ctx.globalCompositeOperation = "source-over";
+			for (const p of particles) {
+				if (p.layer !== "bokeh") continue;
+				const t = (p.tBase + elapsedSec * p.tSpeed) % 1;
+				const g = p.ribbon === "sol" ? solGeometry : astraGeometry;
+				const w = p.ribbon === "sol" ? solWidth(t) : astraWidth(t);
 				const pt = bezierPoint(g, t);
 				const tan = bezierTangent(g, t);
-				const x = pt.x - tan.y * (sp.normalFactor * w);
-				const y = pt.y + tan.x * (sp.normalFactor * w);
-				const edgeFade = Math.sin(t * Math.PI);
-				const tw =
-					0.65 + 0.35 * Math.sin(elapsedSec * sp.twinkleSpeed + sp.phase);
-				const alpha = sp.baseAlpha * tw * Math.min(1, edgeFade * 2.2);
-				if (alpha < 0.03) continue;
+				const wave =
+					Math.sin(t * p.waveFreq - elapsedSec * 1.15 + p.wavePhase) *
+					p.waveAmp;
+				const offset = (p.normalBase + wave) * w;
+				const rawX = pt.x - tan.y * offset;
+				const rawY = pt.y + tan.x * offset;
+				const pos = applyPointerField(rawX, rawY, pointerRadius);
 
-				const c =
-					sp.ribbon === "sol"
-						? solColor(t, sp.hot ? "hot" : "mid")
-						: astraColor(t, sp.hot ? "hot" : "mid");
-				ctx.fillStyle = `rgba(${c[0]},${c[1]},${c[2]},${alpha})`;
-				ctx.beginPath();
-				ctx.arc(x, y, sp.r, 0, Math.PI * 2);
-				ctx.fill();
+				const distNorm = Math.min(1, Math.abs(offset) / (w * 1.15));
+				const endFade =
+					p.ribbon === "sol"
+						? Math.min(1, t * 7, (1 - t) * 14)
+						: Math.min(1, t * 14, (1 - t) * 7);
+				const tw =
+					0.72 + 0.28 * Math.sin(elapsedSec * p.twinkleSpeed + p.twinklePhase);
+				const alpha = p.baseAlpha * tw * (1 - distNorm * 0.55) * endFade;
+				if (alpha < 0.02) continue;
+
+				let sprite = sprites.coolBokeh;
+				if (p.ribbon === "sol") {
+					if (t > 0.56) sprite = sprites.warmBokeh;
+					else if (t > 0.28) sprite = sprites.midGoldBokeh;
+				}
+				const drawSize = p.size * (1 - distNorm * 0.3);
+				ctx.globalAlpha = alpha;
+				ctx.drawImage(
+					sprite,
+					pos.x - drawSize * 0.5,
+					pos.y - drawSize * 0.5,
+					drawSize,
+					drawSize,
+				);
 			}
 			ctx.restore();
 
-			// 4-point specular glints along both arcs
+			// 3. Mid beads & near glowing sparks (additive blending for crisp stardust luminance)
+			ctx.save();
+			ctx.globalCompositeOperation = "lighter";
+			for (const p of particles) {
+				if (p.layer === "bokeh") continue;
+				const t = (p.tBase + elapsedSec * p.tSpeed) % 1;
+				const g = p.ribbon === "sol" ? solGeometry : astraGeometry;
+				const w = p.ribbon === "sol" ? solWidth(t) : astraWidth(t);
+				const pt = bezierPoint(g, t);
+				const tan = bezierTangent(g, t);
+				const wave =
+					Math.sin(t * p.waveFreq - elapsedSec * 1.6 + p.wavePhase) * p.waveAmp;
+				const offset = (p.normalBase + wave) * w;
+				const rawX = pt.x - tan.y * offset;
+				const rawY = pt.y + tan.x * offset;
+				const pos = applyPointerField(rawX, rawY, pointerRadius);
+
+				const distNorm = Math.min(1, Math.abs(offset) / (w * 1.15));
+				const endFade =
+					p.ribbon === "sol"
+						? Math.min(1, t * 6, (1 - t) * 16)
+						: Math.min(1, t * 18, (1 - t) * 6);
+				const twWave =
+					0.5 + 0.5 * Math.sin(elapsedSec * p.twinkleSpeed + p.twinklePhase);
+				const tw =
+					p.layer === "spark" ? 0.3 + 0.7 * twWave : 0.45 + 0.55 * twWave;
+				const alpha = Math.min(
+					1,
+					p.baseAlpha * tw * (1 - distNorm * 0.5) * endFade,
+				);
+				if (alpha < 0.03) continue;
+
+				let sprite: HTMLCanvasElement;
+				if (p.hot && twWave > 0.65) {
+					sprite = sprites.hotWhite;
+				} else if (p.ribbon === "sol") {
+					sprite = t > 0.34 ? sprites.warmBead : sprites.coolBead;
+				} else {
+					sprite = sprites.coolBead;
+				}
+
+				const drawSize =
+					p.size *
+					(p.layer === "spark" ? 0.8 + 0.38 * twWave : 0.85 + 0.25 * twWave);
+				ctx.globalAlpha = alpha;
+				ctx.drawImage(
+					sprite,
+					pos.x - drawSize * 0.5,
+					pos.y - drawSize * 0.5,
+					drawSize,
+					drawSize,
+				);
+			}
+			ctx.restore();
+
+			// 4. Flowing 4-point specular star glints riding smoothly along both curves
 			for (const f of flares) {
-				const pulse = 0.84 + 0.16 * Math.sin(elapsedSec * f.speed + f.phase);
+				const t = (f.tBase + elapsedSec * f.tSpeed) % 1;
+				const g = f.ribbon === "sol" ? solGeometry : astraGeometry;
+				const w = f.ribbon === "sol" ? solWidth(t) : astraWidth(t);
+				const pt = bezierPoint(g, t);
+				const tan = bezierTangent(g, t);
+				const rawX = pt.x - tan.y * (f.normalFactor * w);
+				const rawY = pt.y + tan.x * (f.normalFactor * w);
+				const pos = applyPointerField(rawX, rawY, pointerRadius);
+
+				const endFade = Math.min(1, t * 7, (1 - t) * 7);
+				const pulse =
+					0.5 + 0.5 * Math.sin(elapsedSec * f.twinkleSpeed + f.phase);
+				const alpha = f.baseAlpha * (0.42 + 0.58 * pulse) * endFade;
+				const tint: Rgb =
+					f.ribbon === "sol"
+						? lerpColor([195, 224, 255], [255, 206, 132], Math.min(1, t * 1.25))
+						: [166, 212, 255];
+
 				drawFourPointStar(
 					ctx,
-					f.x,
-					f.y,
-					f.size * (0.94 + 0.06 * pulse),
+					pos.x,
+					pos.y,
+					f.size * (0.76 + 0.4 * pulse),
 					f.size * 0.14,
-					f.tint,
-					f.alpha * pulse,
+					tint,
+					alpha,
 					f.includeDiagonal,
+					Math.sin(elapsedSec * 0.8 + f.phase) * 0.08,
 				);
 			}
 
-			// Sol radiant solar orb (subtle corona breathing)
-			const solPulse = Math.sin(elapsedSec * 0.65) * 0.5 + 0.5;
-			drawSolOrb(ctx, solGeometry.p3.x, solGeometry.p3.y, solRadius, solPulse);
+			// 5. Sol radiant solar orb (visible breathing corona + subtle orbital float + pointer lean)
+			const solPulse = 0.5 + 0.5 * Math.sin(elapsedSec * 1.35);
+			const solShimmer = 0.5 + 0.5 * Math.sin(elapsedSec * 2.6 + 0.8);
+			const solFloatX = Math.cos(elapsedSec * 0.55) * 3.5 * scale;
+			const solFloatY = Math.sin(elapsedSec * 0.8) * 3.0 * scale;
+			let solX = solGeometry.p3.x + solFloatX;
+			let solY = solGeometry.p3.y + solFloatY;
+			if (pointer.strength > 0.01) {
+				const dx = pointer.smoothX - solX;
+				const dy = pointer.smoothY - solY;
+				const dist = Math.hypot(dx, dy) || 1;
+				const pull =
+					Math.min(14 * scale, 1800 / (dist + 120)) * pointer.strength;
+				solX += (dx / dist) * pull;
+				solY += (dy / dist) * pull;
+			}
+			drawSolOrb(ctx, solX, solY, solRadius, solPulse, solShimmer);
 
-			// Astra 4-point star (gentle diffraction shimmer)
-			const astraPulse = 0.92 + 0.08 * Math.sin(elapsedSec * 0.9 + 1.1);
+			// 6. Astra 4-point star (clear breathing diffraction spikes + gentle shimmer)
+			const astraPulse =
+				0.84 +
+				0.22 * (0.5 + 0.5 * Math.sin(elapsedSec * 1.7 + 0.9)) +
+				0.08 * Math.sin(elapsedSec * 3.4);
+			const astraDiagRot = Math.sin(elapsedSec * 0.75) * 0.12;
+			let astraX =
+				astraGeometry.p0.x + Math.sin(elapsedSec * 0.6) * 2.2 * scale;
+			let astraY =
+				astraGeometry.p0.y + Math.cos(elapsedSec * 0.75) * 2.0 * scale;
+			if (pointer.strength > 0.01) {
+				const dx = pointer.smoothX - astraX;
+				const dy = pointer.smoothY - astraY;
+				const dist = Math.hypot(dx, dy) || 1;
+				const pull =
+					Math.min(10 * scale, 1400 / (dist + 140)) * pointer.strength;
+				astraX += (dx / dist) * pull;
+				astraY += (dy / dist) * pull;
+			}
 			drawFourPointStar(
 				ctx,
-				astraGeometry.p0.x,
-				astraGeometry.p0.y,
+				astraX,
+				astraY,
 				astraStarSize * astraPulse,
-				9.5 * scale,
+				9.5 * scale * (0.94 + 0.12 * solShimmer),
 				[175, 218, 255],
 				1,
 				true,
+				astraDiagRot,
 			);
 		};
 
 		let rafId = 0;
-		let startTime = performance.now();
+		let elapsedAccSec = 0;
+		let lastFrameMs = 0;
 
 		const stopLoop = () => {
 			if (rafId) {
@@ -769,28 +916,47 @@ export function SpaceBackground() {
 		};
 
 		const tick = (now: number) => {
-			const elapsedSec = (now - startTime) * 0.001;
-			renderFrame(elapsedSec);
+			if (lastFrameMs > 0) {
+				const dtSec = Math.min(0.1, (now - lastFrameMs) * 0.001);
+				elapsedAccSec += dtSec;
+			}
+			lastFrameMs = now;
+			renderFrame(elapsedAccSec);
 			rafId = window.requestAnimationFrame(tick);
 		};
 
 		const syncPlayback = () => {
 			stopLoop();
-			if (reducedMotionQuery.matches || document.hidden) {
+			if (reducedMotionQuery.matches) {
 				renderFrame(0);
 				return;
 			}
-			startTime = performance.now();
+			if (document.hidden) {
+				return;
+			}
+			lastFrameMs = performance.now();
 			rafId = window.requestAnimationFrame(tick);
 		};
 
 		const handleResize = () => {
 			buildScene();
-			renderFrame(
-				reducedMotionQuery.matches
-					? 0
-					: (performance.now() - startTime) * 0.001,
-			);
+			renderFrame(reducedMotionQuery.matches ? 0 : elapsedAccSec);
+		};
+
+		const handlePointerMove = (e: PointerEvent) => {
+			if (reducedMotionQuery.matches) return;
+			const rect = container.getBoundingClientRect();
+			pointer.x = e.clientX - rect.left;
+			pointer.y = e.clientY - rect.top;
+			if (!pointer.active) {
+				pointer.smoothX = pointer.x;
+				pointer.smoothY = pointer.y;
+			}
+			pointer.active = true;
+		};
+
+		const handlePointerLeave = () => {
+			pointer.active = false;
 		};
 
 		buildScene();
@@ -800,12 +966,18 @@ export function SpaceBackground() {
 		ro.observe(container);
 		reducedMotionQuery.addEventListener("change", syncPlayback);
 		document.addEventListener("visibilitychange", syncPlayback);
+		window.addEventListener("pointermove", handlePointerMove, {
+			passive: true,
+		});
+		window.addEventListener("pointerleave", handlePointerLeave);
 
 		return () => {
 			stopLoop();
 			ro.disconnect();
 			reducedMotionQuery.removeEventListener("change", syncPlayback);
 			document.removeEventListener("visibilitychange", syncPlayback);
+			window.removeEventListener("pointermove", handlePointerMove);
+			window.removeEventListener("pointerleave", handlePointerLeave);
 		};
 	}, []);
 
