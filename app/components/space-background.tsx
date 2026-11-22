@@ -5,61 +5,86 @@ import { useEffect, useRef } from "react";
 type Point = { x: number; y: number };
 type Rgb = [number, number, number];
 
-type RibbonGeometry = {
+type CubicSpec = {
 	p0: Point;
 	p1: Point;
 	p2: Point;
 	p3: Point;
 };
 
-type RibbonParticle = {
-	ribbon: "sol" | "astra";
-	layer: "bokeh" | "mid" | "spark";
-	tBase: number;
-	tSpeed: number;
-	normalBase: number;
-	waveAmp: number;
-	waveFreq: number;
-	wavePhase: number;
-	size: number;
-	baseAlpha: number;
-	twinklePhase: number;
-	twinkleSpeed: number;
-	hot: boolean;
-};
-
-type FlowingFlare = {
-	ribbon: "sol" | "astra";
-	tBase: number;
-	tSpeed: number;
-	normalFactor: number;
-	size: number;
-	baseAlpha: number;
-	phase: number;
-	twinkleSpeed: number;
-	includeDiagonal: boolean;
-};
-
-type TwinkleStar = {
-	x: number;
-	y: number;
-	r: number;
-	baseAlpha: number;
+type PathDef = {
+	kind: "gold" | "blue";
+	depth: number;
 	phase: number;
 	speed: number;
-	driftX: number;
-	driftY: number;
+	strong: boolean;
+	endWidthStart: number;
+	endWidthSettled: number;
+	followupDensity: number;
+	samples: Float32Array;
+};
+
+type StarParticle = {
+	pathIndex: number;
+	orbitProgress: number;
+	acrossOffset: number;
+	depthOffset: number;
+	scale: number;
+	layer: number;
+	brightness: number;
+	opacity: number;
+	twinklePhase: number;
+	twinkleRate: number;
+	colorIndex: number;
+	isFollowup: boolean;
+	hasCrossFlare: boolean;
+	hx: number;
+	hy: number;
+	hvx: number;
+	hvy: number;
+};
+
+type DustParticle = {
+	pathIndex: number;
+	orbitProgress: number;
+	acrossOffset: number;
+	depthOffset: number;
+	driftPhase: number;
+	scale: number;
+	opacity: number;
+	colorIndex: number;
+	hx: number;
+	hy: number;
+	hvx: number;
+	hvy: number;
+};
+
+type AmbientStar = {
+	baseX: number;
+	baseY: number;
+	r: number;
+	brightness: number;
+	twinklePhase: number;
+	twinkleRate: number;
 	warm: boolean;
 };
 
-type SpriteSet = {
-	coolBokeh: HTMLCanvasElement;
-	midGoldBokeh: HTMLCanvasElement;
-	warmBokeh: HTMLCanvasElement;
-	coolBead: HTMLCanvasElement;
-	warmBead: HTMLCanvasElement;
-	hotWhite: HTMLCanvasElement;
+type SpriteBank = {
+	goldStars: HTMLCanvasElement[];
+	blueStars: HTMLCanvasElement[];
+	goldDust: HTMLCanvasElement[];
+	blueDust: HTMLCanvasElement[];
 };
+
+const PATH_SAMPLES = 512;
+const FLOW_SPEED = 0.55;
+const TRAIL_DISPERSION = 0.56;
+const TWINKLE_SPEED = 0.45;
+const DUST_DRIFT_SPEED = 0.2;
+const SCROLL_TRAVEL_SECONDS = 12;
+
+const GOLD_STAR_HEX = ["#FFC77D", "#FFE5BD", "#E8AC62", "#FFF2D9", "#FFFAF0"];
+const BLUE_STAR_HEX = ["#94CCF4", "#D7EDFF", "#639EC4", "#B8E0FA", "#F2FAFF"];
 
 function mulberry32(seed: number) {
 	let a = seed >>> 0;
@@ -78,108 +103,209 @@ function gaussianRandom(rand: () => number) {
 	return Math.sqrt(-2 * Math.log(u)) * Math.cos(2 * Math.PI * v);
 }
 
+function clamp(v: number, min: number, max: number) {
+	return v < min ? min : v > max ? max : v;
+}
+
 function lerp(a: number, b: number, t: number) {
 	return a + (b - a) * t;
 }
 
-function lerpColor(c1: Rgb, c2: Rgb, t: number): Rgb {
-	return [
-		Math.round(lerp(c1[0], c2[0], t)),
-		Math.round(lerp(c1[1], c2[1], t)),
-		Math.round(lerp(c1[2], c2[2], t)),
-	];
+function smoothstep(edge0: number, edge1: number, x: number) {
+	const t = clamp((x - edge0) / Math.max(edge1 - edge0, 1e-6), 0, 1);
+	return t * t * (3 - 2 * t);
 }
 
-function bezierPoint(g: RibbonGeometry, t: number): Point {
-	const u = 1 - t;
-	const tt = t * t;
-	const uu = u * u;
+function smootherstep(edge0: number, edge1: number, x: number) {
+	const t = clamp((x - edge0) / Math.max(edge1 - edge0, 1e-6), 0, 1);
+	return t * t * t * (t * (t * 6 - 15) + 10);
+}
+
+function hexToRgb(hex: string): Rgb {
+	const clean = hex.replace("#", "");
+	const n = Number.parseInt(clean, 16);
+	return [(n >> 16) & 255, (n >> 8) & 255, n & 255];
+}
+
+function sampleCubicChain(segments: CubicSpec[]): Float32Array {
+	const out = new Float32Array(PATH_SAMPLES * 4);
+	const segCount = segments.length;
+
+	const evalSeg = (s: CubicSpec, t: number) => {
+		const u = 1 - t;
+		const uu = u * u;
+		const tt = t * t;
+		const x =
+			uu * u * s.p0.x +
+			3 * uu * t * s.p1.x +
+			3 * u * tt * s.p2.x +
+			tt * t * s.p3.x;
+		const y =
+			uu * u * s.p0.y +
+			3 * uu * t * s.p1.y +
+			3 * u * tt * s.p2.y +
+			tt * t * s.p3.y;
+		const dx =
+			3 * uu * (s.p1.x - s.p0.x) +
+			6 * u * t * (s.p2.x - s.p1.x) +
+			3 * tt * (s.p3.x - s.p2.x);
+		const dy =
+			3 * uu * (s.p1.y - s.p0.y) +
+			6 * u * t * (s.p2.y - s.p1.y) +
+			3 * tt * (s.p3.y - s.p2.y);
+		const len = Math.hypot(dx, dy) || 1;
+		return { x, y, tx: dx / len, ty: dy / len };
+	};
+
+	const rawSteps = 256;
+	const rawX = new Float32Array(rawSteps + 1);
+	const rawY = new Float32Array(rawSteps + 1);
+	const rawTx = new Float32Array(rawSteps + 1);
+	const rawTy = new Float32Array(rawSteps + 1);
+	const cumLen = new Float32Array(rawSteps + 1);
+
+	let totalLen = 0;
+	for (let i = 0; i <= rawSteps; i++) {
+		const uGlobal = i / rawSteps;
+		const scaled = uGlobal * segCount;
+		const segIdx = Math.min(segCount - 1, Math.floor(scaled));
+		const localT = scaled - segIdx;
+		const p = evalSeg(segments[segIdx], localT);
+		rawX[i] = p.x;
+		rawY[i] = p.y;
+		rawTx[i] = p.tx;
+		rawTy[i] = p.ty;
+		if (i > 0) {
+			totalLen += Math.hypot(p.x - rawX[i - 1], p.y - rawY[i - 1]);
+		}
+		cumLen[i] = totalLen;
+	}
+
+	let cursor = 0;
+	for (let i = 0; i < PATH_SAMPLES; i++) {
+		const target = (i / (PATH_SAMPLES - 1)) * totalLen;
+		while (cursor < rawSteps - 1 && cumLen[cursor + 1] < target) {
+			cursor++;
+		}
+		const segLen = Math.max(cumLen[cursor + 1] - cumLen[cursor], 1e-6);
+		const f = clamp((target - cumLen[cursor]) / segLen, 0, 1);
+		const idx = i * 4;
+		out[idx] = lerp(rawX[cursor], rawX[cursor + 1], f);
+		out[idx + 1] = lerp(rawY[cursor], rawY[cursor + 1], f);
+		const tx = lerp(rawTx[cursor], rawTx[cursor + 1], f);
+		const ty = lerp(rawTy[cursor], rawTy[cursor + 1], f);
+		const tLen = Math.hypot(tx, ty) || 1;
+		out[idx + 2] = tx / tLen;
+		out[idx + 3] = ty / tLen;
+	}
+
+	return out;
+}
+
+function lookupPath(samples: Float32Array, progress: number) {
+	const scaled = clamp(progress, 0, 1) * (PATH_SAMPLES - 1);
+	const lo = Math.floor(scaled);
+	const hi = Math.min(lo + 1, PATH_SAMPLES - 1);
+	const f = scaled - lo;
+	const i0 = lo * 4;
+	const i1 = hi * 4;
 	return {
-		x:
-			uu * u * g.p0.x +
-			3 * uu * t * g.p1.x +
-			3 * u * tt * g.p2.x +
-			tt * t * g.p3.x,
-		y:
-			uu * u * g.p0.y +
-			3 * uu * t * g.p1.y +
-			3 * u * tt * g.p2.y +
-			tt * t * g.p3.y,
+		x: lerp(samples[i0], samples[i1], f),
+		y: lerp(samples[i0 + 1], samples[i1 + 1], f),
+		tx: lerp(samples[i0 + 2], samples[i1 + 2], f),
+		ty: lerp(samples[i0 + 3], samples[i1 + 3], f),
 	};
 }
 
-function bezierTangent(g: RibbonGeometry, t: number): Point {
-	const u = 1 - t;
-	const dx =
-		3 * u * u * (g.p1.x - g.p0.x) +
-		6 * u * t * (g.p2.x - g.p1.x) +
-		3 * t * t * (g.p3.x - g.p2.x);
-	const dy =
-		3 * u * u * (g.p1.y - g.p0.y) +
-		6 * u * t * (g.p2.y - g.p1.y) +
-		3 * t * t * (g.p3.y - g.p2.y);
-	const len = Math.hypot(dx, dy) || 1;
-	return { x: dx / len, y: dy / len };
-}
-
-function createRadialSprite(
-	size: number,
-	stops: Array<[number, string]>,
-): HTMLCanvasElement {
+function createStarSprite(hex: string, size: number, isDust: boolean) {
 	const c = document.createElement("canvas");
 	c.width = size;
 	c.height = size;
 	const sctx = c.getContext("2d");
 	if (!sctx) return c;
+	const [r, g, b] = hexToRgb(hex);
 	const half = size / 2;
 	const grad = sctx.createRadialGradient(half, half, 0, half, half, half);
-	for (const [offset, color] of stops) {
-		grad.addColorStop(offset, color);
+
+	if (isDust) {
+		grad.addColorStop(0, `rgba(${r},${g},${b},0.85)`);
+		grad.addColorStop(0.55, `rgba(${r},${g},${b},0.42)`);
+		grad.addColorStop(1, `rgba(${r},${g},${b},0)`);
+	} else {
+		grad.addColorStop(0, "rgba(255,255,255,1)");
+		grad.addColorStop(
+			0.24,
+			`rgba(${Math.min(255, r + 40)},${Math.min(255, g + 40)},${Math.min(255, b + 40)},0.92)`,
+		);
+		grad.addColorStop(0.56, `rgba(${r},${g},${b},0.35)`);
+		grad.addColorStop(1, `rgba(${r},${g},${b},0)`);
 	}
+
 	sctx.fillStyle = grad;
 	sctx.fillRect(0, 0, size, size);
 	return c;
 }
 
-function buildSprites(): SpriteSet {
+function buildSpriteBank(): SpriteBank {
 	return {
-		coolBokeh: createRadialSprite(48, [
-			[0, "rgba(86, 136, 206, 0.95)"],
-			[0.65, "rgba(64, 108, 174, 0.62)"],
-			[1, "rgba(64, 108, 174, 0)"],
-		]),
-		midGoldBokeh: createRadialSprite(48, [
-			[0, "rgba(182, 146, 108, 0.92)"],
-			[0.65, "rgba(148, 114, 78, 0.56)"],
-			[1, "rgba(148, 114, 78, 0)"],
-		]),
-		warmBokeh: createRadialSprite(48, [
-			[0, "rgba(206, 146, 84, 0.95)"],
-			[0.65, "rgba(174, 118, 64, 0.60)"],
-			[1, "rgba(174, 118, 64, 0)"],
-		]),
-		coolBead: createRadialSprite(32, [
-			[0, "rgba(255, 255, 255, 1)"],
-			[0.32, "rgba(186, 224, 255, 0.92)"],
-			[0.68, "rgba(104, 166, 238, 0.36)"],
-			[1, "rgba(104, 166, 238, 0)"],
-		]),
-		warmBead: createRadialSprite(32, [
-			[0, "rgba(255, 252, 244, 1)"],
-			[0.34, "rgba(255, 218, 158, 0.92)"],
-			[0.68, "rgba(232, 164, 92, 0.36)"],
-			[1, "rgba(232, 164, 92, 0)"],
-		]),
-		hotWhite: createRadialSprite(32, [
-			[0, "rgba(255, 255, 255, 1)"],
-			[0.42, "rgba(245, 250, 255, 0.88)"],
-			[0.76, "rgba(210, 230, 255, 0.24)"],
-			[1, "rgba(210, 230, 255, 0)"],
-		]),
+		goldStars: GOLD_STAR_HEX.map((hex) => createStarSprite(hex, 32, false)),
+		blueStars: BLUE_STAR_HEX.map((hex) => createStarSprite(hex, 32, false)),
+		goldDust: GOLD_STAR_HEX.map((hex) => createStarSprite(hex, 48, true)),
+		blueDust: BLUE_STAR_HEX.map((hex) => createStarSprite(hex, 48, true)),
 	};
 }
 
-function drawFourPointStar(
+function trailSpreadScale(progress: number, endWidth: number) {
+	const taper = lerp(1, endWidth, smoothstep(0.94, 1, progress));
+	return (
+		taper * (1 + TRAIL_DISPERSION * 11.5 * (1 - clamp(progress, 0, 1)) ** 1.35)
+	);
+}
+
+function stepHoverWake(
+	p: { hx: number; hy: number; hvx: number; hvy: number },
+	screenX: number,
+	screenY: number,
+	scaleFactor: number,
+	particleSizeNorm: number,
+	dt: number,
+	stroke: { x: number; y: number; dx: number; dy: number } | null,
+) {
+	if (dt > 0 && (p.hx || p.hy || p.hvx || p.hvy)) {
+		const n = clamp((particleSizeNorm - 1) / 13, 0, 1);
+		const s = 2.3 / Math.sqrt(0.65 + 1.75 * n * n * (3 - 2 * n));
+		const l = Math.exp(-s * dt);
+		const o = Math.exp(-dt);
+		const c = (o - l) / (s - 1);
+		p.hx = p.hx * o + p.hvx * c;
+		p.hy = p.hy * o + p.hvy * c;
+		p.hvx *= l;
+		p.hvy *= l;
+		if (
+			Math.abs(p.hx) + Math.abs(p.hy) + Math.abs(p.hvx) + Math.abs(p.hvy) <
+			0.02
+		) {
+			p.hx = 0;
+			p.hy = 0;
+			p.hvx = 0;
+			p.hvy = 0;
+		}
+	}
+
+	if (stroke && (stroke.dx !== 0 || stroke.dy !== 0)) {
+		const dist = Math.hypot(
+			screenX + p.hx - stroke.x,
+			screenY + p.hy - stroke.y,
+		);
+		if (dist < 190) {
+			const d = (1 - dist / 190) ** 2;
+			p.hvx += stroke.dx * d * 8 * scaleFactor;
+			p.hvy += stroke.dy * d * 8 * scaleFactor;
+		}
+	}
+}
+
+function drawFourPointFlare(
 	ctx: CanvasRenderingContext2D,
 	x: number,
 	y: number,
@@ -188,29 +314,31 @@ function drawFourPointStar(
 	tint: Rgb,
 	alpha: number,
 	includeDiagonal: boolean,
-	diagonalRotation = 0,
+	hoverDirX = 0,
+	hoverDirY = 0,
+	hoverStrength = 0,
 ) {
-	if (alpha < 0.02 || size < 1) return;
+	if (alpha < 0.015 || size < 1) return;
 	ctx.save();
 	ctx.globalCompositeOperation = "lighter";
 
-	const aura = ctx.createRadialGradient(x, y, 0, x, y, size * 0.44);
-	aura.addColorStop(0, `rgba(255,255,255,${0.94 * alpha})`);
+	const aura = ctx.createRadialGradient(x, y, 0, x, y, size * 0.42);
+	aura.addColorStop(0, `rgba(255,255,255,${0.9 * alpha})`);
 	aura.addColorStop(
-		0.2,
-		`rgba(${tint[0]},${tint[1]},${tint[2]},${0.54 * alpha})`,
+		0.22,
+		`rgba(${tint[0]},${tint[1]},${tint[2]},${0.48 * alpha})`,
 	);
 	aura.addColorStop(
-		0.56,
-		`rgba(${tint[0]},${tint[1]},${tint[2]},${0.13 * alpha})`,
+		0.58,
+		`rgba(${tint[0]},${tint[1]},${tint[2]},${0.1 * alpha})`,
 	);
 	aura.addColorStop(1, "rgba(0,0,0,0)");
 	ctx.fillStyle = aura;
 	ctx.beginPath();
-	ctx.arc(x, y, size * 0.44, 0, Math.PI * 2);
+	ctx.arc(x, y, size * 0.42, 0, Math.PI * 2);
 	ctx.fill();
 
-	const drawSpike = (
+	const drawHalfSpike = (
 		angle: number,
 		length: number,
 		halfWidth: number,
@@ -219,48 +347,56 @@ function drawFourPointStar(
 		ctx.save();
 		ctx.translate(x, y);
 		ctx.rotate(angle);
-		const grad = ctx.createLinearGradient(-length, 0, length, 0);
-		grad.addColorStop(0, "rgba(255,255,255,0)");
+		const grad = ctx.createLinearGradient(0, 0, length, 0);
+		grad.addColorStop(0, `rgba(255,255,255,${0.98 * op})`);
 		grad.addColorStop(
-			0.3,
-			`rgba(${tint[0]},${tint[1]},${tint[2]},${0.35 * op})`,
-		);
-		grad.addColorStop(0.5, `rgba(255,255,255,${0.98 * op})`);
-		grad.addColorStop(
-			0.7,
-			`rgba(${tint[0]},${tint[1]},${tint[2]},${0.35 * op})`,
+			0.35,
+			`rgba(${tint[0]},${tint[1]},${tint[2]},${0.36 * op})`,
 		);
 		grad.addColorStop(1, "rgba(255,255,255,0)");
 		ctx.fillStyle = grad;
 		ctx.beginPath();
-		ctx.moveTo(-length, 0);
-		ctx.quadraticCurveTo(0, -halfWidth, length, 0);
-		ctx.quadraticCurveTo(0, halfWidth, -length, 0);
+		ctx.moveTo(0, -halfWidth);
+		ctx.quadraticCurveTo(length * 0.45, -halfWidth * 0.28, length, 0);
+		ctx.quadraticCurveTo(length * 0.45, halfWidth * 0.28, 0, halfWidth);
+		ctx.closePath();
 		ctx.fill();
 		ctx.restore();
 	};
 
-	drawSpike(0, size, Math.max(0.75, size * 0.027), alpha);
-	drawSpike(Math.PI / 2, size * 0.96, Math.max(0.75, size * 0.027), alpha);
+	const halfW = Math.max(0.7, size * 0.024);
+	const boost = (dx: number, dy: number) =>
+		1 +
+		hoverStrength *
+			clamp((dx * hoverDirX + dy * hoverDirY) * 0.45, -0.18, 0.36);
+
+	drawHalfSpike(0, size * boost(1, 0), halfW, alpha * boost(1, 0));
+	drawHalfSpike(Math.PI, size * boost(-1, 0), halfW, alpha * boost(-1, 0));
+	drawHalfSpike(
+		Math.PI / 2,
+		size * 0.94 * boost(0, 1),
+		halfW,
+		alpha * boost(0, 1),
+	);
+	drawHalfSpike(
+		-Math.PI / 2,
+		size * 0.94 * boost(0, -1),
+		halfW,
+		alpha * boost(0, -1),
+	);
 
 	if (includeDiagonal) {
-		drawSpike(
-			Math.PI / 4 + diagonalRotation,
-			size * 0.28,
-			Math.max(0.55, size * 0.02),
-			alpha * 0.56,
-		);
-		drawSpike(
-			-Math.PI / 4 + diagonalRotation,
-			size * 0.28,
-			Math.max(0.55, size * 0.02),
-			alpha * 0.56,
-		);
+		const diagLen = size * 0.26;
+		const diagW = Math.max(0.5, size * 0.016);
+		drawHalfSpike(Math.PI / 4, diagLen, diagW, alpha * 0.46);
+		drawHalfSpike((-3 * Math.PI) / 4, diagLen, diagW, alpha * 0.46);
+		drawHalfSpike(-Math.PI / 4, diagLen, diagW, alpha * 0.46);
+		drawHalfSpike((3 * Math.PI) / 4, diagLen, diagW, alpha * 0.46);
 	}
 
 	const core = ctx.createRadialGradient(x, y, 0, x, y, coreRadius);
 	core.addColorStop(0, `rgba(255,255,255,${alpha})`);
-	core.addColorStop(0.55, `rgba(255,255,255,${0.88 * alpha})`);
+	core.addColorStop(0.55, `rgba(255,255,255,${0.86 * alpha})`);
 	core.addColorStop(1, "rgba(255,255,255,0)");
 	ctx.fillStyle = core;
 	ctx.beginPath();
@@ -270,58 +406,92 @@ function drawFourPointStar(
 	ctx.restore();
 }
 
-function drawSolOrb(
+function drawPoisedSolOrb(
 	ctx: CanvasRenderingContext2D,
 	x: number,
 	y: number,
 	radius: number,
-	pulse: number,
-	shimmer: number,
+	reveal: number,
+	elapsedSec: number,
+	hoverX: number,
+	hoverY: number,
+	hoverStrength: number,
 ) {
+	if (reveal <= 0.005) return;
+
 	ctx.save();
 	ctx.globalCompositeOperation = "screen";
 
-	const outerR = radius * (3.85 + pulse * 0.85);
-	const halo3 = ctx.createRadialGradient(x, y, radius * 0.6, x, y, outerR);
-	halo3.addColorStop(0, `rgba(255, 208, 136, ${0.56 + pulse * 0.18})`);
-	halo3.addColorStop(0.26, `rgba(226, 150, 80, ${0.3 + pulse * 0.14})`);
-	halo3.addColorStop(0.58, `rgba(132, 74, 42, ${0.1 + pulse * 0.06})`);
-	halo3.addColorStop(1, "rgba(0, 0, 0, 0)");
-	ctx.fillStyle = halo3;
+	const outerR = radius * 4.4;
+	const haloOuter = ctx.createRadialGradient(x, y, radius * 0.72, x, y, outerR);
+	haloOuter.addColorStop(0, `rgba(255, 206, 134, ${0.56 * reveal})`);
+	haloOuter.addColorStop(0.24, `rgba(222, 146, 78, ${0.28 * reveal})`);
+	haloOuter.addColorStop(0.55, `rgba(128, 70, 38, ${0.09 * reveal})`);
+	haloOuter.addColorStop(1, "rgba(0, 0, 0, 0)");
+	ctx.fillStyle = haloOuter;
 	ctx.beginPath();
 	ctx.arc(x, y, outerR, 0, Math.PI * 2);
 	ctx.fill();
 
-	const midR = radius * (1.72 + pulse * 0.34);
-	const halo2 = ctx.createRadialGradient(x, y, radius * 0.8, x, y, midR);
-	halo2.addColorStop(0, "rgba(255, 248, 230, 0.98)");
-	halo2.addColorStop(0.32, `rgba(255, 208, 140, ${0.72 + shimmer * 0.18})`);
-	halo2.addColorStop(0.68, `rgba(220, 144, 74, ${0.22 + pulse * 0.14})`);
-	halo2.addColorStop(1, "rgba(0, 0, 0, 0)");
-	ctx.fillStyle = halo2;
+	const rimR = radius * 1.75;
+	const haloRim = ctx.createRadialGradient(x, y, radius * 0.86, x, y, rimR);
+	haloRim.addColorStop(0, `rgba(255, 246, 224, ${0.95 * reveal})`);
+	haloRim.addColorStop(0.28, `rgba(255, 204, 132, ${0.72 * reveal})`);
+	haloRim.addColorStop(0.65, `rgba(218, 142, 74, ${0.2 * reveal})`);
+	haloRim.addColorStop(1, "rgba(0, 0, 0, 0)");
+	ctx.fillStyle = haloRim;
 	ctx.beginPath();
-	ctx.arc(x, y, midR, 0, Math.PI * 2);
+	ctx.arc(x, y, rimR, 0, Math.PI * 2);
 	ctx.fill();
 	ctx.restore();
 
-	const discR = radius * (1.03 + pulse * 0.035);
 	ctx.save();
-	const disc = ctx.createRadialGradient(
-		x - radius * 0.1,
-		y - radius * 0.1,
+	ctx.globalAlpha = reveal;
+	const limbGrad = ctx.createRadialGradient(
+		x - radius * 0.14,
+		y - radius * 0.14,
 		0,
 		x,
 		y,
-		discR,
+		radius * 1.04,
 	);
-	disc.addColorStop(0, "#ffffff");
-	disc.addColorStop(0.75, "#fffbf2");
-	disc.addColorStop(0.92, "#ffe0ab");
-	disc.addColorStop(1, "rgba(255, 198, 124, 0)");
-	ctx.fillStyle = disc;
+	limbGrad.addColorStop(0, "#fffdf8");
+	limbGrad.addColorStop(0.62, "#fff5df");
+	limbGrad.addColorStop(0.86, "#ffd694");
+	limbGrad.addColorStop(0.96, "#f0aa5a");
+	limbGrad.addColorStop(1, "rgba(240, 170, 90, 0)");
+	ctx.fillStyle = limbGrad;
 	ctx.beginPath();
-	ctx.arc(x, y, discR, 0, Math.PI * 2);
+	ctx.arc(x, y, radius * 1.04, 0, Math.PI * 2);
 	ctx.fill();
+
+	ctx.globalCompositeOperation = "lighter";
+	const sheenAngle = elapsedSec * 0.18;
+	const sx = x + Math.cos(sheenAngle) * radius * 0.16;
+	const sy = y + Math.sin(sheenAngle * 0.8) * radius * 0.14;
+	const sheen = ctx.createRadialGradient(sx, sy, 0, sx, sy, radius * 0.72);
+	sheen.addColorStop(0, "rgba(255, 250, 232, 0.22)");
+	sheen.addColorStop(0.6, "rgba(255, 206, 132, 0.08)");
+	sheen.addColorStop(1, "rgba(255, 206, 132, 0)");
+	ctx.fillStyle = sheen;
+	ctx.beginPath();
+	ctx.arc(x, y, radius * 0.96, 0, Math.PI * 2);
+	ctx.fill();
+
+	if (hoverStrength > 0.01) {
+		const hx = x + hoverX * radius * 0.55;
+		const hy = y + hoverY * radius * 0.55;
+		const hGrad = ctx.createRadialGradient(hx, hy, 0, hx, hy, radius * 0.95);
+		hGrad.addColorStop(
+			0,
+			`rgba(255, 240, 205, ${0.34 * hoverStrength * reveal})`,
+		);
+		hGrad.addColorStop(1, "rgba(255, 199, 125, 0)");
+		ctx.fillStyle = hGrad;
+		ctx.beginPath();
+		ctx.arc(x, y, radius * 1.35, 0, Math.PI * 2);
+		ctx.fill();
+	}
 	ctx.restore();
 }
 
@@ -345,46 +515,46 @@ export function SpaceBackground() {
 		const staticCtx = staticCanvas.getContext("2d", { alpha: false });
 		if (!staticCtx) return;
 
-		const sprites = buildSprites();
+		const sprites = buildSpriteBank();
 
 		let width = 1;
 		let height = 1;
 		let dpr = 1;
 		let scale = 1;
-		let solGeometry: RibbonGeometry = {
-			p0: { x: 0, y: 0 },
-			p1: { x: 0, y: 0 },
-			p2: { x: 0, y: 0 },
-			p3: { x: 0, y: 0 },
-		};
-		let astraGeometry: RibbonGeometry = {
-			p0: { x: 0, y: 0 },
-			p1: { x: 0, y: 0 },
-			p2: { x: 0, y: 0 },
-			p3: { x: 0, y: 0 },
-		};
-		let solRadius = 38;
-		let astraStarSize = 102;
-		let stars: TwinkleStar[] = [];
-		let particles: RibbonParticle[] = [];
-		let flares: FlowingFlare[] = [];
+		let paths: PathDef[] = [];
+		let stars: StarParticle[] = [];
+		let dust: DustParticle[] = [];
+		let ambientStars: AmbientStar[] = [];
+		let solPos: Point = { x: 0, y: 0 };
+		let astraPos: Point = { x: 0, y: 0 };
+		let solRadius = 36;
+		let astraStarSize = 100;
 
-		// Pointer attraction/repulsion state inspired by the OpenAI Astra/Sol hero
 		const pointer = {
 			active: false,
 			x: 0,
 			y: 0,
-			smoothX: 0,
-			smoothY: 0,
-			strength: 0,
+			prevX: 0,
+			prevY: 0,
+			dx: 0,
+			dy: 0,
+			hoverStrength: 0,
+			solHoverX: 0,
+			solHoverY: 0,
+			solHoverZ: 0,
+			astraHoverX: 0,
+			astraHoverY: 0,
+			astraHoverZ: 0,
 		};
 
-		const solWidth = (t: number) => {
-			const belly = Math.sin(t ** 0.78 * Math.PI);
-			return (lerp(34, 8, t ** 1.5) + belly * 12) * scale;
-		};
+		let scrollNorm = 0;
+		let smoothScroll = 0;
 
-		const astraWidth = (t: number) => (5 + t ** 0.85 * 45) * scale;
+		const readScroll = () => {
+			const h = Math.max(window.innerHeight, 1);
+			const s = clamp(window.scrollY / h, 0, 1);
+			scrollNorm = s * (2 - s);
+		};
 
 		const buildScene = () => {
 			width = Math.max(1, container.clientWidth);
@@ -399,509 +569,681 @@ export function SpaceBackground() {
 			canvas.height = Math.round(height * dpr);
 			staticCanvas.width = canvas.width;
 			staticCanvas.height = canvas.height;
-
 			staticCtx.setTransform(dpr, 0, 0, dpr, 0, 0);
 
-			const rand = mulberry32(20261124);
 			const isCompact = width < 768;
+			const px = (nx: number) => nx * width;
+			const py = (ny: number) => ny * height;
 
-			solGeometry = isCompact
-				? {
-						p0: { x: -width * 0.06, y: height * 0.17 },
-						p1: { x: width * 0.25, y: -height * 0.01 },
-						p2: { x: width * 0.66, y: height * 0.01 },
-						p3: { x: width * 0.88, y: height * 0.12 },
-					}
-				: {
-						p0: { x: -width * 0.02, y: height * 0.23 },
-						p1: { x: width * 0.24, y: -height * 0.015 },
-						p2: { x: width * 0.68, y: -height * 0.01 },
-						p3: { x: width * 0.912, y: height * 0.175 },
-					};
+			solPos = isCompact
+				? { x: px(0.88), y: py(0.125) }
+				: { x: px(0.912), y: py(0.175) };
+			astraPos = isCompact
+				? { x: px(0.22), y: py(0.835) }
+				: { x: px(0.375), y: py(0.805) };
 
-			astraGeometry = isCompact
-				? {
-						p0: { x: width * 0.2, y: height * 0.84 },
-						p1: { x: width * 0.44, y: height * 0.96 },
-						p2: { x: width * 0.76, y: height * 0.93 },
-						p3: { x: width * 1.04, y: height * 0.74 },
-					}
-				: {
-						p0: { x: width * 0.375, y: height * 0.805 },
-						p1: { x: width * 0.53, y: height * 0.955 },
-						p2: { x: width * 0.79, y: height * 0.935 },
-						p3: { x: width * 1.02, y: height * 0.665 },
-					};
+			solRadius = 37 * scale;
+			astraStarSize = 100 * scale;
 
-			solRadius = 38 * scale;
-			astraStarSize = 102 * scale;
+			// Upper Gold front path: left outside -> upper arch -> converges INTO Sol orb
+			const goldFrontSegs: CubicSpec[] = isCompact
+				? [
+						{
+							p0: { x: px(-0.08), y: py(0.22) },
+							p1: { x: px(0.14), y: py(0.05) },
+							p2: { x: px(0.38), y: py(-0.01) },
+							p3: { x: px(0.56), y: py(0.02) },
+						},
+						{
+							p0: { x: px(0.56), y: py(0.02) },
+							p1: { x: px(0.7), y: py(0.03) },
+							p2: { x: px(0.81), y: py(0.07) },
+							p3: solPos,
+						},
+					]
+				: [
+						{
+							p0: { x: px(-0.05), y: py(0.27) },
+							p1: { x: px(0.12), y: py(0.09) },
+							p2: { x: px(0.34), y: py(0.015) },
+							p3: { x: px(0.56), y: py(0.032) },
+						},
+						{
+							p0: { x: px(0.56), y: py(0.032) },
+							p1: { x: px(0.71), y: py(0.042) },
+							p2: { x: px(0.83), y: py(0.095) },
+							p3: solPos,
+						},
+					];
 
-			// 1. Static midnight navy backdrop + subtle blooms + blurred spine glows
+			const goldBackSegs: CubicSpec[] = goldFrontSegs.map((s, idx) => ({
+				p0:
+					idx === 0
+						? { x: s.p0.x + px(0.01), y: s.p0.y + py(0.014) }
+						: { x: s.p0.x, y: s.p0.y + py(0.012) },
+				p1: { x: s.p1.x + px(0.008), y: s.p1.y + py(0.014) },
+				p2: { x: s.p2.x + px(0.006), y: s.p2.y + py(0.014) },
+				p3: idx === 1 ? solPos : { x: s.p3.x, y: s.p3.y + py(0.012) },
+			}));
+
+			// Lower Blue front path: right outside -> lower arch -> converges INTO Astra 4-point star
+			const blueFrontSegs: CubicSpec[] = isCompact
+				? [
+						{
+							p0: { x: px(1.06), y: py(0.71) },
+							p1: { x: px(0.88), y: py(0.86) },
+							p2: { x: px(0.68), y: py(0.95) },
+							p3: { x: px(0.48), y: py(0.94) },
+						},
+						{
+							p0: { x: px(0.48), y: py(0.94) },
+							p1: { x: px(0.37), y: py(0.93) },
+							p2: { x: px(0.28), y: py(0.89) },
+							p3: astraPos,
+						},
+					]
+				: [
+						{
+							p0: { x: px(1.05), y: py(0.65) },
+							p1: { x: px(0.89), y: py(0.84) },
+							p2: { x: px(0.72), y: py(0.95) },
+							p3: { x: px(0.58), y: py(0.925) },
+						},
+						{
+							p0: { x: px(0.58), y: py(0.925) },
+							p1: { x: px(0.49), y: py(0.915) },
+							p2: { x: px(0.42), y: py(0.87) },
+							p3: astraPos,
+						},
+					];
+
+			const blueBackSegs: CubicSpec[] = blueFrontSegs.map((s, idx) => ({
+				p0:
+					idx === 0
+						? { x: s.p0.x - px(0.01), y: s.p0.y - py(0.012) }
+						: { x: s.p0.x, y: s.p0.y - py(0.01) },
+				p1: { x: s.p1.x - px(0.008), y: s.p1.y - py(0.012) },
+				p2: { x: s.p2.x - px(0.006), y: s.p2.y - py(0.01) },
+				p3: idx === 1 ? astraPos : { x: s.p3.x, y: s.p3.y - py(0.01) },
+			}));
+
+			paths = [
+				{
+					kind: "gold",
+					depth: 0.22,
+					phase: 0.16,
+					speed: 0.025,
+					strong: true,
+					endWidthStart: 1,
+					endWidthSettled: 1,
+					followupDensity: 0,
+					samples: sampleCubicChain(goldFrontSegs),
+				},
+				{
+					kind: "gold",
+					depth: -0.16,
+					phase: 0.72,
+					speed: -0.018,
+					strong: false,
+					endWidthStart: 1,
+					endWidthSettled: 1,
+					followupDensity: 0,
+					samples: sampleCubicChain(goldBackSegs),
+				},
+				{
+					kind: "blue",
+					depth: 0.24,
+					phase: 0.38,
+					speed: 0.021,
+					strong: true,
+					endWidthStart: 0.22,
+					endWidthSettled: 0.55,
+					followupDensity: 0.6,
+					samples: sampleCubicChain(blueFrontSegs),
+				},
+				{
+					kind: "blue",
+					depth: -0.18,
+					phase: 0.58,
+					speed: -0.016,
+					strong: false,
+					endWidthStart: 0.22,
+					endWidthSettled: 0.55,
+					followupDensity: 0.6,
+					samples: sampleCubicChain(blueBackSegs),
+				},
+			];
+
 			const bgGrad = staticCtx.createLinearGradient(0, 0, 0, height);
-			bgGrad.addColorStop(0, "#0c1427");
-			bgGrad.addColorStop(0.38, "#070b1b");
-			bgGrad.addColorStop(0.75, "#0b1428");
-			bgGrad.addColorStop(1, "#142139");
+			bgGrad.addColorStop(0, "#0a1324");
+			bgGrad.addColorStop(0.36, "#060c1b");
+			bgGrad.addColorStop(0.72, "#081224");
+			bgGrad.addColorStop(1, "#112036");
 			staticCtx.fillStyle = bgGrad;
 			staticCtx.fillRect(0, 0, width, height);
 
 			const centerVignette = staticCtx.createRadialGradient(
 				width * 0.48,
-				height * 0.44,
+				height * 0.45,
 				width * 0.06,
 				width * 0.48,
-				height * 0.44,
-				width * 0.62,
+				height * 0.45,
+				width * 0.64,
 			);
-			centerVignette.addColorStop(0, "rgba(5, 8, 22, 0.45)");
-			centerVignette.addColorStop(1, "rgba(18, 32, 58, 0)");
+			centerVignette.addColorStop(0, "rgba(3, 10, 22, 0.52)");
+			centerVignette.addColorStop(1, "rgba(14, 28, 52, 0)");
 			staticCtx.fillStyle = centerVignette;
 			staticCtx.fillRect(0, 0, width, height);
 
 			staticCtx.save();
 			staticCtx.globalCompositeOperation = "screen";
-			const solAmb = staticCtx.createRadialGradient(
-				solGeometry.p3.x,
-				solGeometry.p3.y,
-				6 * scale,
-				solGeometry.p3.x,
-				solGeometry.p3.y,
-				width * 0.24,
-			);
-			solAmb.addColorStop(0, "rgba(255, 206, 138, 0.36)");
-			solAmb.addColorStop(0.24, "rgba(216, 146, 82, 0.17)");
-			solAmb.addColorStop(0.58, "rgba(112, 68, 42, 0.06)");
-			solAmb.addColorStop(1, "rgba(0, 0, 0, 0)");
-			staticCtx.fillStyle = solAmb;
-			staticCtx.fillRect(0, 0, width, height);
-
 			const astraAmb = staticCtx.createRadialGradient(
 				width * 0.66,
-				height * 0.86,
-				10 * scale,
+				height * 0.87,
+				12 * scale,
 				width * 0.66,
-				height * 0.86,
+				height * 0.87,
 				width * 0.36,
 			);
-			astraAmb.addColorStop(0, "rgba(88, 148, 228, 0.16)");
-			astraAmb.addColorStop(0.45, "rgba(40, 82, 150, 0.08)");
+			astraAmb.addColorStop(0, "rgba(92, 152, 228, 0.13)");
+			astraAmb.addColorStop(0.5, "rgba(40, 82, 150, 0.06)");
 			astraAmb.addColorStop(1, "rgba(0, 0, 0, 0)");
 			staticCtx.fillStyle = astraAmb;
 			staticCtx.fillRect(0, 0, width, height);
 			staticCtx.restore();
 
-			const drawRibbonGlow = (
-				g: RibbonGeometry,
-				startColor: string,
-				midColor: string,
-				endColor: string,
-				lineWidth: number,
-			) => {
-				staticCtx.save();
-				staticCtx.globalCompositeOperation = "screen";
-				staticCtx.lineCap = "round";
-				const grad = staticCtx.createLinearGradient(
-					g.p0.x,
-					g.p0.y,
-					g.p3.x,
-					g.p3.y,
-				);
-				grad.addColorStop(0, startColor);
-				grad.addColorStop(0.5, midColor);
-				grad.addColorStop(1, endColor);
-				staticCtx.strokeStyle = grad;
-				staticCtx.lineWidth = lineWidth;
-				staticCtx.filter = `blur(${Math.round(13 * scale)}px)`;
-				staticCtx.beginPath();
-				staticCtx.moveTo(g.p0.x, g.p0.y);
-				staticCtx.bezierCurveTo(g.p1.x, g.p1.y, g.p2.x, g.p2.y, g.p3.x, g.p3.y);
-				staticCtx.stroke();
-				staticCtx.restore();
-			};
-
-			drawRibbonGlow(
-				solGeometry,
-				"rgba(118, 162, 220, 0.12)",
-				"rgba(232, 190, 134, 0.18)",
-				"rgba(255, 192, 118, 0.28)",
-				38 * scale,
-			);
-			drawRibbonGlow(
-				astraGeometry,
-				"rgba(195, 228, 255, 0.22)",
-				"rgba(96, 155, 230, 0.16)",
-				"rgba(70, 128, 210, 0.15)",
-				41 * scale,
-			);
-
-			// 2. Distant twinkling background stars (with subtle slow drift)
-			stars = [];
-			for (let i = 0; i < 80; i++) {
-				stars.push({
-					x: rand() * width,
-					y: rand() * height,
-					r: (0.55 + rand() * 0.95) * scale,
-					baseAlpha: 0.22 + rand() * 0.55,
-					phase: rand() * Math.PI * 2,
-					speed: 1.0 + rand() * 2.0,
-					driftX: (rand() - 0.5) * 2.4,
-					driftY: (rand() - 0.5) * 1.8,
-					warm: rand() > 0.72,
-				});
-			}
-
-			// 3. Live layered streaming stardust particles along both trajectories
-			particles = [];
+			const rand = mulberry32(20261124);
 			const density = isCompact ? 0.62 : 1;
 
-			const addRibbonParticles = (
-				ribbon: "sol" | "astra",
-				bokehCount: number,
-				midCount: number,
-				sparkCount: number,
-			) => {
-				// Far/deep bokeh layer (stately visible glide)
-				for (let i = 0; i < bokehCount; i++) {
-					particles.push({
-						ribbon,
-						layer: "bokeh",
-						tBase: rand(),
-						tSpeed: 0.022 + rand() * 0.024,
-						normalBase: gaussianRandom(rand) * 0.58,
-						waveAmp: (0.04 + rand() * 0.08) * (rand() < 0.5 ? 1 : -1),
-						waveFreq: 5 + rand() * 4,
-						wavePhase: rand() * Math.PI * 2,
-						size: (3.6 + rand() * 7.2) * scale,
-						baseAlpha: 0.18 + rand() * 0.28,
-						twinklePhase: rand() * Math.PI * 2,
-						twinkleSpeed: 0.9 + rand() * 1.3,
-						hot: false,
-					});
-				}
-
-				// Mid stardust beads (fluid continuous stream)
-				for (let i = 0; i < midCount; i++) {
-					particles.push({
-						ribbon,
-						layer: "mid",
-						tBase: rand(),
-						tSpeed: 0.045 + rand() * 0.055,
-						normalBase: gaussianRandom(rand) * (rand() < 0.72 ? 0.36 : 0.72),
-						waveAmp: (0.05 + rand() * 0.11) * (rand() < 0.5 ? 1 : -1),
-						waveFreq: 6 + rand() * 5,
-						wavePhase: rand() * Math.PI * 2,
-						size: (2.6 + rand() * 4.2) * scale,
-						baseAlpha: 0.34 + rand() * 0.58,
-						twinklePhase: rand() * Math.PI * 2,
-						twinkleSpeed: 1.6 + rand() * 2.4,
-						hot: rand() > 0.72,
-					});
-				}
-
-				// Near bright sparks (energetic luminous stream)
-				for (let i = 0; i < sparkCount; i++) {
-					particles.push({
-						ribbon,
-						layer: "spark",
-						tBase: rand(),
-						tSpeed: 0.085 + rand() * 0.075,
-						normalBase: gaussianRandom(rand) * 0.32,
-						waveAmp: (0.06 + rand() * 0.12) * (rand() < 0.5 ? 1 : -1),
-						waveFreq: 7 + rand() * 5,
-						wavePhase: rand() * Math.PI * 2,
-						size: (5.2 + rand() * 5.4) * scale,
-						baseAlpha: 0.55 + rand() * 0.45,
-						twinklePhase: rand() * Math.PI * 2,
-						twinkleSpeed: 2.2 + rand() * 2.8,
-						hot: rand() > 0.35,
-					});
-				}
-			};
-
-			addRibbonParticles(
-				"sol",
-				Math.round(230 * density),
-				Math.round(520 * density),
-				Math.round(95 * density),
-			);
-			addRibbonParticles(
-				"astra",
-				Math.round(210 * density),
-				Math.round(470 * density),
-				Math.round(90 * density),
-			);
-
-			// 4. Flowing 4-point specular flares riding smoothly along both arcs
-			flares = [];
-			const solFlareCount = isCompact ? 7 : 10;
-			for (let i = 0; i < solFlareCount; i++) {
-				const baseSize = (15 + rand() * 14) * scale;
-				flares.push({
-					ribbon: "sol",
-					tBase: (i + rand() * 0.45) / solFlareCount,
-					tSpeed: 0.055 + rand() * 0.04,
-					normalFactor: (rand() - 0.5) * 0.28,
-					size: baseSize,
-					baseAlpha: 0.78 + rand() * 0.22,
-					phase: rand() * Math.PI * 2,
-					twinkleSpeed: 2.0 + rand() * 1.8,
-					includeDiagonal: baseSize > 20 * scale,
+			ambientStars = [];
+			const ambientCount = Math.round(115 * density);
+			for (let i = 0; i < ambientCount; i++) {
+				ambientStars.push({
+					baseX: rand() * width,
+					baseY: rand() * height,
+					r: (0.45 + rand() * 0.9) * scale,
+					brightness: 0.35 + rand() * 0.65,
+					twinklePhase: rand() * Math.PI * 2,
+					twinkleRate: 0.6 + rand() * 1.1,
+					warm: rand() > 0.78,
 				});
 			}
 
-			const astraFlareCount = isCompact ? 6 : 9;
-			for (let i = 0; i < astraFlareCount; i++) {
-				const baseSize = (15 + rand() * 16) * scale;
-				flares.push({
-					ribbon: "astra",
-					tBase: (i + rand() * 0.45) / astraFlareCount,
-					tSpeed: 0.055 + rand() * 0.04,
-					normalFactor: (rand() - 0.5) * 0.3,
-					size: baseSize,
-					baseAlpha: 0.78 + rand() * 0.22,
-					phase: rand() * Math.PI * 2,
-					twinkleSpeed: 2.0 + rand() * 1.8,
-					includeDiagonal: baseSize > 20 * scale,
-				});
+			stars = [];
+			dust = [];
+			const baseWidthPx = 8.2 * scale;
+
+			for (let pIdx = 0; pIdx < paths.length; pIdx++) {
+				const path = paths[pIdx];
+				const isFront = path.strong;
+				const mainStarCount = Math.round((isFront ? 410 : 220) * density);
+				const followupStarCount = Math.round(
+					mainStarCount * path.followupDensity * 0.55,
+				);
+				const totalStars = mainStarCount + followupStarCount;
+
+				for (let i = 0; i < totalStars; i++) {
+					const isFollowup = i >= mainStarCount;
+					const starScale = 0.45 + rand() ** 1.7 * 2.15;
+					const depthOffset = (rand() - 0.5) * 1 + path.depth;
+					const layer = clamp(
+						starScale * 0.34 + (depthOffset + 0.5) * 0.45,
+						0,
+						1,
+					);
+					const brightness = 0.55 + rand() ** 2.4 * 2.1;
+					const hasCrossFlare = isFront && brightness > 1.85 && rand() < 0.24;
+
+					stars.push({
+						pathIndex: pIdx,
+						orbitProgress: rand(),
+						acrossOffset:
+							gaussianRandom(rand) * baseWidthPx * (isFront ? 0.72 : 0.92),
+						depthOffset,
+						scale: starScale,
+						layer,
+						brightness,
+						opacity: (isFront ? 0.45 : 0.32) + rand() * 0.52,
+						twinklePhase: rand() * Math.PI * 2,
+						twinkleRate: 0.65 + rand() * 1.15,
+						colorIndex: Math.floor(rand() * 5),
+						isFollowup,
+						hasCrossFlare,
+						hx: 0,
+						hy: 0,
+						hvx: 0,
+						hvy: 0,
+					});
+				}
+
+				const dustCount = Math.round((isFront ? 220 : 120) * density);
+				for (let i = 0; i < dustCount; i++) {
+					dust.push({
+						pathIndex: pIdx,
+						orbitProgress: rand(),
+						acrossOffset:
+							gaussianRandom(rand) * baseWidthPx * (isFront ? 0.95 : 1.1),
+						depthOffset: (rand() - 0.5) * 0.8 + path.depth,
+						driftPhase: rand(),
+						scale: (0.7 + rand() * 1.9) * scale,
+						opacity: (isFront ? 0.24 : 0.16) + rand() * 0.24,
+						colorIndex: Math.floor(rand() * 5),
+						hx: 0,
+						hy: 0,
+						hvx: 0,
+						hvy: 0,
+					});
+				}
 			}
 		};
 
-		const applyPointerField = (x: number, y: number, radiusPx: number) => {
-			if (pointer.strength <= 0.01) return { x, y };
-			const dx = x - pointer.smoothX;
-			const dy = y - pointer.smoothY;
-			const distSq = dx * dx + dy * dy;
-			const maxDistSq = radiusPx * radiusPx;
-			if (distSq >= maxDistSq || distSq < 0.001) return { x, y };
+		const renderFrame = (
+			elapsedSec: number,
+			dtSec: number,
+			isReduced: boolean,
+		) => {
+			smoothScroll += (scrollNorm - smoothScroll) * Math.min(1, dtSec * 8 || 1);
+			const scrollVal = isReduced ? 0 : smoothScroll;
 
-			const dist = Math.sqrt(distSq);
-			const norm = 1 - dist / radiusPx;
-			const nx = dx / dist;
-			const ny = dy / dist;
+			const stroke =
+				!isReduced && pointer.active && (pointer.dx !== 0 || pointer.dy !== 0)
+					? {
+							x: pointer.x,
+							y: pointer.y,
+							dx: pointer.dx,
+							dy: pointer.dy,
+						}
+					: null;
+			pointer.dx = 0;
+			pointer.dy = 0;
 
-			// Inner soft repulsion + outer subtle attraction & orbital swirl
-			const radialForce =
-				(dist < radiusPx * 0.48 ? norm * 24 : -norm * 10) * pointer.strength;
-			const swirlForce = norm * norm * 14 * pointer.strength;
+			const dampAlpha = 1 - Math.exp(-14 * Math.max(dtSec, 0.016));
+			pointer.hoverStrength = lerp(
+				pointer.hoverStrength,
+				!isReduced && pointer.active ? 1 : 0,
+				dampAlpha,
+			);
 
-			return {
-				x: x + nx * radialForce - ny * swirlForce,
-				y: y + ny * radialForce + nx * swirlForce,
-			};
-		};
+			const introTime = isReduced ? 10 : elapsedSec;
+			const solReveal = smootherstep(0.6, 1.65, introTime);
+			const goldFadeProgress = clamp((introTime - 0.6) / 2.6, 0, 1);
+			const blueStarReveal = smootherstep(1.77, 2.82, introTime);
+			const blueFadeProgress = clamp((introTime - 1.77) / 2.6, 0, 1);
+			const followupReveal = clamp((introTime - 4.37) / 1.8, 0, 1);
+			const blueEndWidth = lerp(0.22, 0.55, smoothstep(0, 1, followupReveal));
+			const skyReveal = smootherstep(0, 0.55, introTime);
 
-		const renderFrame = (elapsedSec: number) => {
-			// Smooth pointer inertia
-			if (pointer.active) {
-				pointer.smoothX += (pointer.x - pointer.smoothX) * 0.12;
-				pointer.smoothY += (pointer.y - pointer.smoothY) * 0.12;
-				pointer.strength += (1 - pointer.strength) * 0.1;
+			if (!isReduced && pointer.active) {
+				const solReach = solRadius * 3.4;
+				const sdx = (pointer.x - solPos.x) / solReach;
+				const sdy = (pointer.y - solPos.y) / solReach;
+				const sDist = Math.hypot(sdx, sdy);
+				const sInf = 1 - smoothstep(0.35, 1, sDist);
+				if (sInf > 0) {
+					pointer.solHoverX = lerp(pointer.solHoverX, sdx, dampAlpha);
+					pointer.solHoverY = lerp(pointer.solHoverY, sdy, dampAlpha);
+				}
+				pointer.solHoverZ = lerp(
+					pointer.solHoverZ,
+					sInf * solReveal,
+					dampAlpha,
+				);
+
+				const astraReach = astraStarSize * 1.75;
+				const adx = (pointer.x - astraPos.x) / astraReach;
+				const ady = (pointer.y - astraPos.y) / astraReach;
+				const aDist = Math.hypot(adx, ady);
+				const aInf = 1 - smoothstep(0.35, 1, aDist);
+				if (aInf > 0) {
+					pointer.astraHoverX = lerp(pointer.astraHoverX, adx, dampAlpha);
+					pointer.astraHoverY = lerp(pointer.astraHoverY, ady, dampAlpha);
+				}
+				pointer.astraHoverZ = lerp(
+					pointer.astraHoverZ,
+					aInf * blueStarReveal,
+					dampAlpha,
+				);
 			} else {
-				pointer.strength *= 0.92;
+				pointer.solHoverZ = lerp(pointer.solHoverZ, 0, dampAlpha);
+				pointer.astraHoverZ = lerp(pointer.astraHoverZ, 0, dampAlpha);
 			}
 
 			ctx.setTransform(1, 0, 0, 1, 0, 0);
 			ctx.drawImage(staticCanvas, 0, 0);
 			ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
 
-			// 1. Twinkling background starfield with gentle slow drift
-			for (const s of stars) {
-				const sx = (s.x + elapsedSec * s.driftX + width) % width;
-				const sy = (s.y + elapsedSec * s.driftY + height) % height;
-				const tw =
-					0.35 + 0.65 * (0.5 + 0.5 * Math.sin(elapsedSec * s.speed + s.phase));
-				const alpha = s.baseAlpha * tw;
+			if (solReveal > 0.01) {
+				ctx.save();
+				ctx.globalCompositeOperation = "screen";
+				const solAmb = ctx.createRadialGradient(
+					solPos.x,
+					solPos.y,
+					6 * scale,
+					solPos.x,
+					solPos.y,
+					width * 0.25,
+				);
+				solAmb.addColorStop(0, `rgba(255, 206, 138, ${0.32 * solReveal})`);
+				solAmb.addColorStop(0.26, `rgba(216, 146, 82, ${0.15 * solReveal})`);
+				solAmb.addColorStop(0.58, `rgba(112, 68, 42, ${0.05 * solReveal})`);
+				solAmb.addColorStop(1, "rgba(0, 0, 0, 0)");
+				ctx.fillStyle = solAmb;
+				ctx.fillRect(0, 0, width, height);
+				ctx.restore();
+			}
+
+			const cx = width * 0.5;
+			const cy = height * 0.5;
+			const hoverPushRadius = 0.28 * Math.min(width, height);
+			for (const s of ambientStars) {
+				const radialFactor = 1 + scrollVal * (0.05 + s.brightness * 0.08);
+				let sx = cx + (s.baseX - cx) * radialFactor;
+				let sy = cy + (s.baseY - cy) * radialFactor;
+
+				if (pointer.hoverStrength > 0.01) {
+					const awayX = sx - pointer.x;
+					const awayY = sy - pointer.y;
+					const dist = Math.hypot(awayX, awayY);
+					if (dist < hoverPushRadius) {
+						const inf = 1 - smoothstep(0, hoverPushRadius, dist);
+						const push = inf * pointer.hoverStrength * 18 * scale;
+						const inv = 1 / Math.max(dist, 12);
+						sx += awayX * inv * push;
+						sy += awayY * inv * push;
+					}
+				}
+
+				const twinkle =
+					0.86 +
+					0.14 *
+						Math.sin(
+							s.twinklePhase +
+								(isReduced ? 0 : elapsedSec) * TWINKLE_SPEED * s.twinkleRate,
+						);
+				const alpha = s.brightness * 0.62 * twinkle * skyReveal;
 				ctx.fillStyle = s.warm
-					? `rgba(255, 238, 210, ${alpha})`
-					: `rgba(210, 228, 255, ${alpha})`;
+					? `rgba(255, 236, 205, ${alpha})`
+					: `rgba(186, 222, 252, ${alpha})`;
 				ctx.beginPath();
 				ctx.arc(sx, sy, s.r, 0, Math.PI * 2);
 				ctx.fill();
 			}
 
-			const pointerRadius = 180 * scale;
+			const pathOffsets = new Float32Array(paths.length);
+			const pathHeads = new Float32Array(paths.length);
+			for (let i = 0; i < paths.length; i++) {
+				const path = paths[i];
+				const scrollShift =
+					scrollVal * SCROLL_TRAVEL_SECONDS * path.speed * FLOW_SPEED;
+				const timeShift = isReduced ? 0 : elapsedSec * path.speed * FLOW_SPEED;
+				pathOffsets[i] = timeShift + scrollShift;
 
-			// 2. Bokeh layer (normal blending for photographic depth)
-			ctx.save();
-			ctx.globalCompositeOperation = "source-over";
-			for (const p of particles) {
-				if (p.layer !== "bokeh") continue;
-				const t = (p.tBase + elapsedSec * p.tSpeed) % 1;
-				const g = p.ribbon === "sol" ? solGeometry : astraGeometry;
-				const w = p.ribbon === "sol" ? solWidth(t) : astraWidth(t);
-				const pt = bezierPoint(g, t);
-				const tan = bezierTangent(g, t);
-				const wave =
-					Math.sin(t * p.waveFreq - elapsedSec * 1.15 + p.wavePhase) *
-					p.waveAmp;
-				const offset = (p.normalBase + wave) * w;
-				const rawX = pt.x - tan.y * offset;
-				const rawY = pt.y + tan.x * offset;
-				const pos = applyPointerField(rawX, rawY, pointerRadius);
-
-				const distNorm = Math.min(1, Math.abs(offset) / (w * 1.15));
-				const endFade =
-					p.ribbon === "sol"
-						? Math.min(1, t * 7, (1 - t) * 14)
-						: Math.min(1, t * 14, (1 - t) * 7);
-				const tw =
-					0.72 + 0.28 * Math.sin(elapsedSec * p.twinkleSpeed + p.twinklePhase);
-				const alpha = p.baseAlpha * tw * (1 - distNorm * 0.55) * endFade;
-				if (alpha < 0.02) continue;
-
-				let sprite = sprites.coolBokeh;
-				if (p.ribbon === "sol") {
-					if (t > 0.56) sprite = sprites.warmBokeh;
-					else if (t > 0.28) sprite = sprites.midGoldBokeh;
-				}
-				const drawSize = p.size * (1 - distNorm * 0.3);
-				ctx.globalAlpha = alpha;
-				ctx.drawImage(
-					sprite,
-					pos.x - drawSize * 0.5,
-					pos.y - drawSize * 0.5,
-					drawSize,
-					drawSize,
-				);
+				const rawTravel = isReduced
+					? path.phase
+					: (((path.phase +
+							elapsedSec * Math.abs(path.speed) +
+							Math.abs(scrollShift)) %
+							1) +
+							1) %
+						1;
+				pathHeads[i] = path.speed < 0 ? 1 - rawTravel : rawTravel;
 			}
-			ctx.restore();
 
-			// 3. Mid beads & near glowing sparks (additive blending for crisp stardust luminance)
+			// Orbital dust layer illuminated by traveling light head + trailing wake
 			ctx.save();
 			ctx.globalCompositeOperation = "lighter";
-			for (const p of particles) {
-				if (p.layer === "bokeh") continue;
-				const t = (p.tBase + elapsedSec * p.tSpeed) % 1;
-				const g = p.ribbon === "sol" ? solGeometry : astraGeometry;
-				const w = p.ribbon === "sol" ? solWidth(t) : astraWidth(t);
-				const pt = bezierPoint(g, t);
-				const tan = bezierTangent(g, t);
-				const wave =
-					Math.sin(t * p.waveFreq - elapsedSec * 1.6 + p.wavePhase) * p.waveAmp;
-				const offset = (p.normalBase + wave) * w;
-				const rawX = pt.x - tan.y * offset;
-				const rawY = pt.y + tan.x * offset;
-				const pos = applyPointerField(rawX, rawY, pointerRadius);
+			for (const d of dust) {
+				const path = paths[d.pathIndex];
+				const isGold = path.kind === "gold";
+				const fadeProgress = isGold ? goldFadeProgress : blueFadeProgress;
+				if (fadeProgress <= 0.001) continue;
 
-				const distNorm = Math.min(1, Math.abs(offset) / (w * 1.15));
-				const endFade =
-					p.ribbon === "sol"
-						? Math.min(1, t * 6, (1 - t) * 16)
-						: Math.min(1, t * 18, (1 - t) * 6);
-				const twWave =
-					0.5 + 0.5 * Math.sin(elapsedSec * p.twinkleSpeed + p.twinklePhase);
-				const tw =
-					p.layer === "spark" ? 0.3 + 0.7 * twWave : 0.45 + 0.55 * twWave;
-				const alpha = Math.min(
-					1,
-					p.baseAlpha * tw * (1 - distNorm * 0.5) * endFade,
+				const endWidth = isGold ? 1 : blueEndWidth;
+				const direction = path.speed >= 0 ? 1 : -1;
+				const head = pathHeads[d.pathIndex];
+				const lightReach = path.strong ? 0.2 : 0.17;
+
+				const distToHead = Math.abs(d.orbitProgress - head);
+				let illum = 1 - smoothstep(lightReach * 0.08, lightReach, distToHead);
+				illum *= illum;
+
+				let distBehind =
+					direction > 0 ? head - d.orbitProgress : d.orbitProgress - head;
+				if (distBehind < 0) distBehind += 1;
+				let trailIllum = 1 - smoothstep(0, 0.32, distBehind);
+				trailIllum *= trailIllum;
+				illum = Math.max(illum, trailIllum * 0.68);
+
+				const distFromSource =
+					direction > 0 ? d.orbitProgress : 1 - d.orbitProgress;
+				const fadeStart = 0.54 * distFromSource + 0.2 * d.driftPhase;
+				const revealAlpha = smoothstep(
+					fadeStart,
+					fadeStart + 0.26,
+					fadeProgress,
 				);
-				if (alpha < 0.03) continue;
+				if (revealAlpha < 0.01) continue;
 
-				let sprite: HTMLCanvasElement;
-				if (p.hot && twWave > 0.65) {
-					sprite = sprites.hotWhite;
-				} else if (p.ribbon === "sol") {
-					sprite = t > 0.34 ? sprites.warmBead : sprites.coolBead;
-				} else {
-					sprite = sprites.coolBead;
-				}
+				const driftCycle = isReduced
+					? 0.5
+					: (d.driftPhase + elapsedSec * DUST_DRIFT_SPEED) % 1;
+				const driftFade = isReduced
+					? 1
+					: smoothstep(0, 0.1, driftCycle) *
+						(1 - smoothstep(0.9, 1, driftCycle));
+
+				const sample = lookupPath(path.samples, d.orbitProgress);
+				const spread = trailSpreadScale(d.orbitProgress, endWidth);
+				const nx = -sample.ty;
+				const ny = sample.tx;
+				const driftAlong = (driftCycle - 0.5) * 26 * scale * direction;
+
+				const baseX =
+					sample.x + nx * d.acrossOffset * spread + sample.tx * driftAlong;
+				const baseY =
+					sample.y + ny * d.acrossOffset * spread + sample.ty * driftAlong;
+
+				stepHoverWake(d, baseX, baseY, 0.18, d.scale, dtSec, stroke);
+
+				const pxX = baseX + d.hx;
+				const pxY = baseY + d.hy;
+				const alpha = clamp(
+					d.opacity * (0.24 + illum * 0.76) * revealAlpha * driftFade,
+					0,
+					0.85,
+				);
+				if (alpha < 0.015) continue;
 
 				const drawSize =
-					p.size *
-					(p.layer === "spark" ? 0.8 + 0.38 * twWave : 0.85 + 0.25 * twWave);
+					(3.4 + d.scale * 2.8 + illum * 2.6) * (0.85 + 0.15 * path.depth);
+				const bank = isGold
+					? d.orbitProgress < 0.22
+						? sprites.blueDust
+						: sprites.goldDust
+					: sprites.blueDust;
 				ctx.globalAlpha = alpha;
 				ctx.drawImage(
-					sprite,
-					pos.x - drawSize * 0.5,
-					pos.y - drawSize * 0.5,
+					bank[d.colorIndex],
+					pxX - drawSize * 0.5,
+					pxY - drawSize * 0.5,
 					drawSize,
 					drawSize,
 				);
 			}
 			ctx.restore();
 
-			// 4. Flowing 4-point specular star glints riding smoothly along both curves
-			for (const f of flares) {
-				const t = (f.tBase + elapsedSec * f.tSpeed) % 1;
-				const g = f.ribbon === "sol" ? solGeometry : astraGeometry;
-				const w = f.ribbon === "sol" ? solWidth(t) : astraWidth(t);
-				const pt = bezierPoint(g, t);
-				const tan = bezierTangent(g, t);
-				const rawX = pt.x - tan.y * (f.normalFactor * w);
-				const rawY = pt.y + tan.x * (f.normalFactor * w);
-				const pos = applyPointerField(rawX, rawY, pointerRadius);
+			// Counter-flowing 4-path star streams
+			ctx.save();
+			ctx.globalCompositeOperation = "lighter";
+			const flareQueue: Array<{
+				x: number;
+				y: number;
+				size: number;
+				alpha: number;
+				tint: Rgb;
+			}> = [];
 
-				const endFade = Math.min(1, t * 7, (1 - t) * 7);
-				const pulse =
-					0.5 + 0.5 * Math.sin(elapsedSec * f.twinkleSpeed + f.phase);
-				const alpha = f.baseAlpha * (0.42 + 0.58 * pulse) * endFade;
-				const tint: Rgb =
-					f.ribbon === "sol"
-						? lerpColor([195, 224, 255], [255, 206, 132], Math.min(1, t * 1.25))
-						: [166, 212, 255];
+			for (const s of stars) {
+				const path = paths[s.pathIndex];
+				const isGold = path.kind === "gold";
+				const fadeProgress = isGold ? goldFadeProgress : blueFadeProgress;
+				if (fadeProgress <= 0.001) continue;
 
-				drawFourPointStar(
+				const endWidth = isGold ? 1 : blueEndWidth;
+				const cruise = 0.42 + 1.65 * s.layer;
+				const rawPhase = s.orbitProgress + pathOffsets[s.pathIndex] * cruise;
+				const pathPhase = ((rawPhase % 1) + 1) % 1;
+				const progress =
+					pathPhase +
+					(0.08 * Math.sin(pathPhase * Math.PI * 2)) / (Math.PI * 2);
+
+				const distFromSource =
+					path.speed > 0 ? s.orbitProgress : 1 - s.orbitProgress;
+				const twinkleFrac = s.twinklePhase / (Math.PI * 2);
+				const fadeStart = 0.54 * distFromSource + 0.2 * twinkleFrac;
+				const revealAlpha = smoothstep(
+					fadeStart,
+					fadeStart + 0.26,
+					fadeProgress,
+				);
+				const followupAlpha = s.isFollowup
+					? smoothstep(
+							0.2 * twinkleFrac,
+							0.8 + 0.2 * twinkleFrac,
+							followupReveal,
+						)
+					: 1;
+				if (revealAlpha * followupAlpha < 0.01) continue;
+
+				const endpointVis = smoothstep(0, 0.055, progress);
+				const middleWeight = lerp(
+					Math.sin(clamp(progress, 0, 1) * Math.PI),
+					1,
+					smoothstep(0.5, 1, progress),
+				);
+				const sizeEnvelope = lerp(
+					1,
+					0.14 + 0.86 * Math.max(middleWeight, 0) ** 0.68,
+					0.12,
+				);
+
+				const sample = lookupPath(path.samples, progress);
+				const spread = trailSpreadScale(progress, endWidth);
+				const nx = -sample.ty;
+				const ny = sample.tx;
+
+				const belly = Math.sin(progress * Math.PI);
+				const driftAmp = (0.18 + s.layer * 0.38) * belly * 24 * scale;
+				const wave =
+					(isReduced ? 0 : elapsedSec) * (0.28 + s.layer * 0.31) +
+					s.twinklePhase;
+				const waveX = Math.sin(wave + sample.y * 0.006) * driftAmp;
+				const waveY = Math.cos(wave * 0.73 + sample.x * 0.004) * driftAmp;
+
+				const baseX = sample.x + nx * s.acrossOffset * spread + waveX;
+				const baseY = sample.y + ny * s.acrossOffset * spread + waveY;
+
+				const wakeScale = 0.38 / Math.sqrt(Math.max(0.3, s.scale));
+				stepHoverWake(s, baseX, baseY, wakeScale, 2 * s.scale, dtSec, stroke);
+
+				const pxX = baseX + s.hx;
+				const pxY = baseY + s.hy;
+
+				const twinkle =
+					0.86 +
+					0.14 *
+						Math.sin(
+							s.twinklePhase +
+								(isReduced ? 0 : elapsedSec) * TWINKLE_SPEED * s.twinkleRate,
+						);
+
+				const alpha = clamp(
+					s.opacity *
+						revealAlpha *
+						followupAlpha *
+						endpointVis *
+						(0.92 + twinkle * 0.08),
+					0,
+					1,
+				);
+				if (alpha < 0.015) continue;
+
+				const drawSize =
+					(1.6 + s.scale * sizeEnvelope * endpointVis * 3.1) *
+					(0.97 + twinkle * 0.03) *
+					scale;
+
+				const bank = isGold
+					? progress < 0.2
+						? sprites.blueStars
+						: sprites.goldStars
+					: sprites.blueStars;
+
+				ctx.globalAlpha = alpha;
+				ctx.drawImage(
+					bank[s.colorIndex],
+					pxX - drawSize * 0.5,
+					pxY - drawSize * 0.5,
+					drawSize,
+					drawSize,
+				);
+
+				if (s.hasCrossFlare && endpointVis > 0.35) {
+					flareQueue.push({
+						x: pxX,
+						y: pxY,
+						size: (12 + s.brightness * 6.5) * scale,
+						alpha: alpha * 0.82 * twinkle,
+						tint: isGold
+							? progress < 0.25
+								? [190, 224, 255]
+								: [255, 206, 134]
+							: [164, 212, 255],
+					});
+				}
+			}
+			ctx.restore();
+
+			for (const fl of flareQueue) {
+				drawFourPointFlare(
 					ctx,
-					pos.x,
-					pos.y,
-					f.size * (0.76 + 0.4 * pulse),
-					f.size * 0.14,
-					tint,
-					alpha,
-					f.includeDiagonal,
-					Math.sin(elapsedSec * 0.8 + f.phase) * 0.08,
+					fl.x,
+					fl.y,
+					fl.size,
+					fl.size * 0.14,
+					fl.tint,
+					fl.alpha,
+					fl.size > 20 * scale,
 				);
 			}
 
-			// 5. Sol radiant solar orb (visible breathing corona + subtle orbital float + pointer lean)
-			const solPulse = 0.5 + 0.5 * Math.sin(elapsedSec * 1.35);
-			const solShimmer = 0.5 + 0.5 * Math.sin(elapsedSec * 2.6 + 0.8);
-			const solFloatX = Math.cos(elapsedSec * 0.55) * 3.5 * scale;
-			const solFloatY = Math.sin(elapsedSec * 0.8) * 3.0 * scale;
-			let solX = solGeometry.p3.x + solFloatX;
-			let solY = solGeometry.p3.y + solFloatY;
-			if (pointer.strength > 0.01) {
-				const dx = pointer.smoothX - solX;
-				const dy = pointer.smoothY - solY;
-				const dist = Math.hypot(dx, dy) || 1;
-				const pull =
-					Math.min(14 * scale, 1800 / (dist + 120)) * pointer.strength;
-				solX += (dx / dist) * pull;
-				solY += (dy / dist) * pull;
-			}
-			drawSolOrb(ctx, solX, solY, solRadius, solPulse, solShimmer);
-
-			// 6. Astra 4-point star (clear breathing diffraction spikes + gentle shimmer)
-			const astraPulse =
-				0.84 +
-				0.22 * (0.5 + 0.5 * Math.sin(elapsedSec * 1.7 + 0.9)) +
-				0.08 * Math.sin(elapsedSec * 3.4);
-			const astraDiagRot = Math.sin(elapsedSec * 0.75) * 0.12;
-			let astraX =
-				astraGeometry.p0.x + Math.sin(elapsedSec * 0.6) * 2.2 * scale;
-			let astraY =
-				astraGeometry.p0.y + Math.cos(elapsedSec * 0.75) * 2.0 * scale;
-			if (pointer.strength > 0.01) {
-				const dx = pointer.smoothX - astraX;
-				const dy = pointer.smoothY - astraY;
-				const dist = Math.hypot(dx, dy) || 1;
-				const pull =
-					Math.min(10 * scale, 1400 / (dist + 140)) * pointer.strength;
-				astraX += (dx / dist) * pull;
-				astraY += (dy / dist) * pull;
-			}
-			drawFourPointStar(
+			drawPoisedSolOrb(
 				ctx,
-				astraX,
-				astraY,
-				astraStarSize * astraPulse,
-				9.5 * scale * (0.94 + 0.12 * solShimmer),
-				[175, 218, 255],
-				1,
-				true,
-				astraDiagRot,
+				solPos.x,
+				solPos.y,
+				solRadius,
+				solReveal,
+				isReduced ? 0 : elapsedSec,
+				pointer.solHoverX,
+				pointer.solHoverY,
+				pointer.solHoverZ,
 			);
+
+			if (blueStarReveal > 0.005) {
+				drawFourPointFlare(
+					ctx,
+					astraPos.x,
+					astraPos.y,
+					astraStarSize,
+					9.5 * scale,
+					[148, 204, 244],
+					blueStarReveal,
+					true,
+					pointer.astraHoverX,
+					pointer.astraHoverY,
+					pointer.astraHoverZ,
+				);
+			}
 		};
 
 		let rafId = 0;
@@ -916,19 +1258,18 @@ export function SpaceBackground() {
 		};
 
 		const tick = (now: number) => {
-			if (lastFrameMs > 0) {
-				const dtSec = Math.min(0.1, (now - lastFrameMs) * 0.001);
-				elapsedAccSec += dtSec;
-			}
+			const dtSec =
+				lastFrameMs > 0 ? Math.min(0.05, (now - lastFrameMs) * 0.001) : 1 / 60;
 			lastFrameMs = now;
-			renderFrame(elapsedAccSec);
+			elapsedAccSec += dtSec;
+			renderFrame(elapsedAccSec, dtSec, false);
 			rafId = window.requestAnimationFrame(tick);
 		};
 
 		const syncPlayback = () => {
 			stopLoop();
 			if (reducedMotionQuery.matches) {
-				renderFrame(0);
+				renderFrame(10, 0, true);
 				return;
 			}
 			if (document.hidden) {
@@ -940,19 +1281,30 @@ export function SpaceBackground() {
 
 		const handleResize = () => {
 			buildScene();
-			renderFrame(reducedMotionQuery.matches ? 0 : elapsedAccSec);
+			readScroll();
+			renderFrame(
+				reducedMotionQuery.matches ? 10 : elapsedAccSec,
+				0,
+				reducedMotionQuery.matches,
+			);
 		};
 
 		const handlePointerMove = (e: PointerEvent) => {
 			if (reducedMotionQuery.matches) return;
 			const rect = container.getBoundingClientRect();
-			pointer.x = e.clientX - rect.left;
-			pointer.y = e.clientY - rect.top;
+			const nx = e.clientX - rect.left;
+			const ny = e.clientY - rect.top;
 			if (!pointer.active) {
-				pointer.smoothX = pointer.x;
-				pointer.smoothY = pointer.y;
+				pointer.prevX = nx;
+				pointer.prevY = ny;
 			}
-			pointer.active = true;
+			pointer.dx += nx - pointer.prevX;
+			pointer.dy += ny - pointer.prevY;
+			pointer.prevX = nx;
+			pointer.prevY = ny;
+			pointer.x = nx;
+			pointer.y = ny;
+			pointer.active = e.pointerType === "mouse" && e.buttons === 0;
 		};
 
 		const handlePointerLeave = () => {
@@ -960,6 +1312,7 @@ export function SpaceBackground() {
 		};
 
 		buildScene();
+		readScroll();
 		syncPlayback();
 
 		const ro = new ResizeObserver(handleResize);
@@ -970,6 +1323,7 @@ export function SpaceBackground() {
 			passive: true,
 		});
 		window.addEventListener("pointerleave", handlePointerLeave);
+		window.addEventListener("scroll", readScroll, { passive: true });
 
 		return () => {
 			stopLoop();
@@ -978,6 +1332,7 @@ export function SpaceBackground() {
 			document.removeEventListener("visibilitychange", syncPlayback);
 			window.removeEventListener("pointermove", handlePointerMove);
 			window.removeEventListener("pointerleave", handlePointerLeave);
+			window.removeEventListener("scroll", readScroll);
 		};
 	}, []);
 
